@@ -28,17 +28,17 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import os
-import statistics
 import time
-import typing as t
+import os
 from collections import deque
+import statistics
 
-import torch
-from rsl_rl.algorithms import PPO, DayDreamer
-from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from torch.utils.tensorboard import SummaryWriter
+import torch
+
+from rsl_rl.algorithms import PPO
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
+from rsl_rl.env import VecEnv
 
 
 class OnPolicyRunner:
@@ -59,9 +59,7 @@ class OnPolicyRunner:
             self.env.num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
-        self.alg: t.Union[PPO, DayDreamer] = alg_class(
-            actor_critic, device=self.device, **self.alg_cfg
-        )
+        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
