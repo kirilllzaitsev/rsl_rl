@@ -1,9 +1,74 @@
+from dataclasses import dataclass
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+from dreamerv2.models.actor import DiscreteActionModel
+from dreamerv2.models.dense import DenseModel
+from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
+from dreamerv2.models.rssm import RSSM
+from dreamerv2.training.trainer import Trainer as DreamerTrainer
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
+
+
+@dataclass
+class DreamerConfig:
+    obs_shape: tuple = (1, 12)
+    action_size: int = 12
+    rssm_type: str = "continuous"
+    rssm_info: dict = {
+        "deter_size": None,
+        "stoch_size": None,
+    }  # ?
+    embedding_size: int = 64
+    rssm_node_size: int = 256  # ?
+    actor: dict = {
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "one_hot",
+    }
+    expl: dict = {
+        "train_noise": 0.3,
+        "eval_noise": 0.0,
+        "expl_min": 0.1,
+        "expl_decay": 1000,
+        "expl_type": "epsilon_greedy",
+    }
+    reward: dict = {
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "normal",
+    }
+    critic: dict = {
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "normal",
+    }
+    discount: dict = {
+        "use": True,
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "normal",
+    }
+    pixel: bool = False
+    obs_encoder: dict = {
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "normal",
+    }
+    obs_decoder: dict = {
+        "layers": 2,
+        "node_size": 256,
+        "activation": nn.ReLU,
+        "dist": "normal",
+    }
 
 
 class DayDreamer:
@@ -50,6 +115,115 @@ class DayDreamer:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
+        # config = MinAtarConfig(
+        #     env=env_name,
+        #     obs_shape=obs_shape,
+        #     action_size=action_size,
+        #     obs_dtype=obs_dtype,
+        #     action_dtype=action_dtype,
+        #     seq_len=seq_len,
+        #     batch_size=batch_size,
+        #     model_dir=model_dir,
+        # )
+        config = DreamerConfig()
+        self._model_initialize(config)
+
+    def _model_initialize(self, config: DreamerConfig):
+        obs_shape = config.obs_shape
+        action_size = config.action_size
+        deter_size = config.rssm_info["deter_size"]
+        if config.rssm_type == "continuous":
+            stoch_size = config.rssm_info["stoch_size"]
+        elif config.rssm_type == "discrete":
+            category_size = config.rssm_info["category_size"]
+            class_size = config.rssm_info["class_size"]
+            stoch_size = category_size * class_size
+
+        embedding_size = config.embedding_size
+        rssm_node_size = config.rssm_node_size
+        modelstate_size = stoch_size + deter_size
+
+        self.RSSM = RSSM(
+            action_size,
+            rssm_node_size,
+            embedding_size,
+            self.device,
+            config.rssm_type,
+            config.rssm_info,
+        ).to(self.device)
+        # actor model. not sure about it being discrete
+        self.ActionModel = DiscreteActionModel(
+            action_size,
+            deter_size,
+            stoch_size,
+            embedding_size,
+            config.actor,
+            config.expl,
+        ).to(self.device)
+        self.RewardDecoder = DenseModel((1,), modelstate_size, config.reward).to(
+            self.device
+        )
+        self.ValueModel = DenseModel((1,), modelstate_size, config.critic).to(
+            self.device
+        )
+        self.TargetValueModel = DenseModel((1,), modelstate_size, config.critic).to(
+            self.device
+        )
+        self.TargetValueModel.load_state_dict(self.ValueModel.state_dict())
+
+        if config.discount["use"]:
+            self.DiscountModel = DenseModel((1,), modelstate_size, config.discount).to(
+                self.device
+            )
+        if config.pixel:
+            self.ObsEncoder = ObsEncoder(
+                obs_shape, embedding_size, config.obs_encoder
+            ).to(self.device)
+            self.ObsDecoder = ObsDecoder(
+                obs_shape, modelstate_size, config.obs_decoder
+            ).to(self.device)
+        else:
+            self.ObsEncoder = DenseModel(
+                (embedding_size,), int(np.prod(obs_shape)), config.obs_encoder
+            ).to(self.device)
+            self.ObsDecoder = DenseModel(
+                obs_shape, modelstate_size, config.obs_decoder
+            ).to(self.device)
+
+    def representation_loss(self, obs, actions, rewards, nonterms):
+
+        embed = self.ObsEncoder(obs)  # t to t+seq_len
+        prev_rssm_state = self.RSSM._init_rssm_state(self.batch_size)
+        prior, posterior = self.RSSM.rollout_observation(
+            self.seq_len, embed, actions, nonterms, prev_rssm_state
+        )
+        post_modelstate = self.RSSM.get_model_state(posterior)  # t to t+seq_len
+        obs_dist = self.ObsDecoder(post_modelstate[:-1])  # t to t+seq_len-1
+        reward_dist = self.RewardDecoder(post_modelstate[:-1])  # t to t+seq_len-1
+        pcont_dist = self.DiscountModel(post_modelstate[:-1])  # t to t+seq_len-1
+
+        obs_loss = self._obs_loss(obs_dist, obs[:-1])
+        reward_loss = self._reward_loss(reward_dist, rewards[1:])
+        pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])
+        prior_dist, post_dist, div = self._kl_loss(prior, posterior)
+
+        model_loss = (
+            self.loss_scale["kl"] * div
+            + reward_loss
+            + obs_loss
+            + self.loss_scale["discount"] * pcont_loss
+        )
+        return (
+            model_loss,
+            div,
+            obs_loss,
+            reward_loss,
+            pcont_loss,
+            prior_dist,
+            post_dist,
+            posterior,
+        )
 
     def init_storage(
         self,
@@ -110,7 +284,134 @@ class DayDreamer:
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-    def update(self):
+    def update(self, train_metrics) -> dict:
+        """
+        trains the world model and imagination actor and critic for collect_interval times using sequence-batch data from buffer
+        """
+        actor_l = []
+        value_l = []
+        obs_l = []
+        model_l = []
+        reward_l = []
+        prior_ent_l = []
+        post_ent_l = []
+        kl_l = []
+        pcont_l = []
+        mean_targ = []
+        min_targ = []
+        max_targ = []
+        std_targ = []
+
+        if self.actor_critic.is_recurrent:
+            generator = self.storage.reccurent_mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
+        else:
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
+        for (
+            obs_batch,
+            critic_obs_batch,
+            actions_batch,
+            target_values_batch,
+            advantages_batch,
+            returns_batch,
+            old_actions_log_prob_batch,
+            old_mu_batch,
+            old_sigma_batch,
+            hid_states_batch,
+            masks_batch,
+        ) in generator:
+            obs = obs_batch
+            rewards = returns_batch
+            actions = actions_batch
+            terms = torch.zeros_like(rewards)
+            # obs, actions, rewards, terms = self.buffer.sample()
+            obs = torch.tensor(obs, dtype=torch.float32).to(self.device)  # t, t+seq_len
+            actions = torch.tensor(actions, dtype=torch.float32).to(
+                self.device
+            )  # t-1, t+seq_len-1
+            rewards = (
+                torch.tensor(rewards, dtype=torch.float32).to(self.device).unsqueeze(-1)
+            )  # t-1 to t+seq_len-1
+            nonterms = (
+                torch.tensor(1 - terms, dtype=torch.float32)
+                .to(self.device)
+                .unsqueeze(-1)
+            )  # t-1 to t+seq_len-1
+
+            (
+                model_loss,
+                kl_loss,
+                obs_loss,
+                reward_loss,
+                pcont_loss,
+                prior_dist,
+                post_dist,
+                posterior,
+            ) = self.representation_loss(obs, actions, rewards, nonterms)
+
+            self.model_optimizer.zero_grad()
+            model_loss.backward()
+            grad_norm_model = torch.nn.utils.clip_grad_norm_(
+                get_parameters(self.world_list), self.grad_clip_norm
+            )
+            self.model_optimizer.step()
+
+            actor_loss, value_loss, target_info = self.actorcritc_loss(posterior)
+
+            self.actor_optimizer.zero_grad()
+            self.value_optimizer.zero_grad()
+
+            actor_loss.backward()
+            value_loss.backward()
+
+            grad_norm_actor = torch.nn.utils.clip_grad_norm_(
+                get_parameters(self.actor_list), self.grad_clip_norm
+            )
+            grad_norm_value = torch.nn.utils.clip_grad_norm_(
+                get_parameters(self.value_list), self.grad_clip_norm
+            )
+
+            self.actor_optimizer.step()
+            self.value_optimizer.step()
+
+            with torch.no_grad():
+                prior_ent = torch.mean(prior_dist.entropy())
+                post_ent = torch.mean(post_dist.entropy())
+
+            prior_ent_l.append(prior_ent.item())
+            post_ent_l.append(post_ent.item())
+            actor_l.append(actor_loss.item())
+            value_l.append(value_loss.item())
+            obs_l.append(obs_loss.item())
+            model_l.append(model_loss.item())
+            reward_l.append(reward_loss.item())
+            kl_l.append(kl_loss.item())
+            pcont_l.append(pcont_loss.item())
+            mean_targ.append(target_info["mean_targ"])
+            min_targ.append(target_info["min_targ"])
+            max_targ.append(target_info["max_targ"])
+            std_targ.append(target_info["std_targ"])
+
+        train_metrics["model_loss"] = np.mean(model_l)
+        train_metrics["kl_loss"] = np.mean(kl_l)
+        train_metrics["reward_loss"] = np.mean(reward_l)
+        train_metrics["obs_loss"] = np.mean(obs_l)
+        train_metrics["value_loss"] = np.mean(value_l)
+        train_metrics["actor_loss"] = np.mean(actor_l)
+        train_metrics["prior_entropy"] = np.mean(prior_ent_l)
+        train_metrics["posterior_entropy"] = np.mean(post_ent_l)
+        train_metrics["pcont_loss"] = np.mean(pcont_l)
+        train_metrics["mean_targ"] = np.mean(mean_targ)
+        train_metrics["min_targ"] = np.mean(min_targ)
+        train_metrics["max_targ"] = np.mean(max_targ)
+        train_metrics["std_targ"] = np.mean(std_targ)
+
+        return train_metrics
+
+    def update_old(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
         if self.actor_critic.is_recurrent:
