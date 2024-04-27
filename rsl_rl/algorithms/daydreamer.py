@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,18 +10,20 @@ from dreamerv2.models.dense import DenseModel
 from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
 from dreamerv2.models.rssm import RSSM
 from dreamerv2.training.trainer import Trainer as DreamerTrainer
+from dreamerv2.utils.algorithm import compute_return
+from dreamerv2.utils.module import FreezeParameters, get_parameters
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 
 
-@dataclass
 class DreamerConfig:
-    obs_shape: tuple = (1, 12)
+    obs_shape: tuple = (1, 48)
     action_size: int = 12
     rssm_type: str = "continuous"
     rssm_info: dict = {
-        "deter_size": None,
-        "stoch_size": None,
+        "deter_size": 256,
+        "stoch_size": 32,
+        "min_std": 0.01,
     }  # ?
     embedding_size: int = 64
     rssm_node_size: int = 256  # ?
@@ -69,6 +72,20 @@ class DreamerConfig:
         "activation": nn.ReLU,
         "dist": "normal",
     }
+
+    actor_grad: str = "reinforce"
+    actor_entropy_scale: float = 0.01
+    lambda_: float = 0.95
+    grad_clip_norm: float = 100.0
+
+    lr: dict = {
+        "model": 1e-3,
+        "actor": 1e-4,
+        "critic": 1e-4,
+    }
+
+    horizon: int = 10
+    discount_: float = 0.99
 
 
 class DayDreamer:
@@ -126,8 +143,17 @@ class DayDreamer:
         #     batch_size=batch_size,
         #     model_dir=model_dir,
         # )
-        config = DreamerConfig()
-        self._model_initialize(config)
+        self.config = DreamerConfig()
+        self._model_initialize(self.config)
+        self.kl_info = dict(
+            use_kl_balance=True,
+            kl_balance_scale=0.5,
+            use_free_nats=True,
+            free_nats=3,
+        )
+        self.loss_scale = {"kl": 1.0, "discount": 0.1}
+        self.batch_size = None
+        self.seq_len = None
 
     def _model_initialize(self, config: DreamerConfig):
         obs_shape = config.obs_shape
@@ -194,10 +220,19 @@ class DayDreamer:
     def representation_loss(self, obs, actions, rewards, nonterms):
 
         embed = self.ObsEncoder(obs)  # t to t+seq_len
-        prev_rssm_state = self.RSSM._init_rssm_state(self.batch_size)
+
+        batch_size = obs.shape[0]
+        if self.batch_size is None:
+            self.batch_size = batch_size
+        prev_rssm_state = self.RSSM._init_rssm_state(batch_size)
+
+        seq_len = obs.shape[1]
+        if self.seq_len is None:
+            self.seq_len = obs.shape[1]
         prior, posterior = self.RSSM.rollout_observation(
-            self.seq_len, embed, actions, nonterms, prev_rssm_state
+            seq_len, embed, actions, nonterms, prev_rssm_state
         )
+
         post_modelstate = self.RSSM.get_model_state(posterior)  # t to t+seq_len
         obs_dist = self.ObsDecoder(post_modelstate[:-1])  # t to t+seq_len-1
         reward_dist = self.RewardDecoder(post_modelstate[:-1])  # t to t+seq_len-1
@@ -224,6 +259,114 @@ class DayDreamer:
             post_dist,
             posterior,
         )
+
+    def _optim_initialize(self, config):
+        model_lr = config.lr["model"]
+        actor_lr = config.lr["actor"]
+        value_lr = config.lr["critic"]
+        self.world_list = [
+            self.ObsEncoder,
+            self.RSSM,
+            self.RewardDecoder,
+            self.ObsDecoder,
+            self.DiscountModel,
+        ]
+        self.actor_list = [self.ActionModel]
+        self.value_list = [self.ValueModel]
+        self.actorcritic_list = [self.ActionModel, self.ValueModel]
+        self.model_optimizer = optim.Adam(get_parameters(self.world_list), model_lr)
+        self.actor_optimizer = optim.Adam(get_parameters(self.actor_list), actor_lr)
+        self.value_optimizer = optim.Adam(get_parameters(self.value_list), value_lr)
+
+    def _actor_loss(
+        self, imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
+    ):
+
+        lambda_returns = compute_return(
+            imag_reward[:-1],
+            imag_value[:-1],
+            discount_arr[:-1],
+            bootstrap=imag_value[-1],
+            lambda_=self.config.lambda_,
+        )
+
+        if self.config.actor_grad == "reinforce":
+            advantage = (lambda_returns - imag_value[:-1]).detach()
+            objective = imag_log_prob[1:].unsqueeze(-1) * advantage
+
+        elif self.config.actor_grad == "dynamics":
+            objective = lambda_returns
+        else:
+            raise NotImplementedError
+
+        discount_arr = torch.cat([torch.ones_like(discount_arr[:1]), discount_arr[1:]])
+        discount = torch.cumprod(discount_arr[:-1], 0)
+        policy_entropy = policy_entropy[1:].unsqueeze(-1)
+        actor_loss = -torch.sum(
+            torch.mean(
+                discount
+                * (objective + self.config.actor_entropy_scale * policy_entropy),
+                dim=1,
+            )
+        )
+        return actor_loss, discount, lambda_returns
+
+    def _value_loss(self, imag_modelstates, discount, lambda_returns):
+        with torch.no_grad():
+            value_modelstates = imag_modelstates[:-1].detach()
+            value_discount = discount.detach()
+            value_target = lambda_returns.detach()
+
+        value_dist = self.ValueModel(value_modelstates)
+        value_loss = -torch.mean(
+            value_discount * value_dist.log_prob(value_target).unsqueeze(-1)
+        )
+        return value_loss
+
+    def _obs_loss(self, obs_dist, obs):
+        obs_loss = -torch.mean(obs_dist.log_prob(obs))
+        return obs_loss
+
+    def _kl_loss(self, prior, posterior):
+        prior_dist = self.RSSM.get_dist(prior)
+        post_dist = self.RSSM.get_dist(posterior)
+        if self.kl_info["use_kl_balance"]:
+            alpha = self.kl_info["kl_balance_scale"]
+            kl_lhs = torch.mean(
+                torch.distributions.kl.kl_divergence(
+                    self.RSSM.get_dist(self.RSSM.rssm_detach(posterior)), prior_dist
+                )
+            )
+            kl_rhs = torch.mean(
+                torch.distributions.kl.kl_divergence(
+                    post_dist, self.RSSM.get_dist(self.RSSM.rssm_detach(prior))
+                )
+            )
+            if self.kl_info["use_free_nats"]:
+                free_nats = self.kl_info["free_nats"]
+                kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), free_nats))
+                kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), free_nats))
+            kl_loss = alpha * kl_lhs + (1 - alpha) * kl_rhs
+
+        else:
+            kl_loss = torch.mean(
+                torch.distributions.kl.kl_divergence(post_dist, prior_dist)
+            )
+            if self.kl_info["use_free_nats"]:
+                free_nats = self.kl_info["free_nats"]
+                kl_loss = torch.max(
+                    kl_loss, kl_loss.new_full(kl_loss.size(), free_nats)
+                )
+        return prior_dist, post_dist, kl_loss
+
+    def _reward_loss(self, reward_dist, rewards):
+        reward_loss = -torch.mean(reward_dist.log_prob(rewards))
+        return reward_loss
+
+    def _pcont_loss(self, pcont_dist, nonterms):
+        pcont_target = nonterms.float()
+        pcont_loss = -torch.mean(pcont_dist.log_prob(pcont_target))
+        return pcont_loss
 
     def init_storage(
         self,
@@ -355,7 +498,7 @@ class DayDreamer:
             self.model_optimizer.zero_grad()
             model_loss.backward()
             grad_norm_model = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.world_list), self.grad_clip_norm
+                get_parameters(self.world_list), self.config.grad_clip_norm
             )
             self.model_optimizer.step()
 
@@ -368,10 +511,10 @@ class DayDreamer:
             value_loss.backward()
 
             grad_norm_actor = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.actor_list), self.grad_clip_norm
+                get_parameters(self.actor_list), self.config.grad_clip_norm
             )
             grad_norm_value = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.value_list), self.grad_clip_norm
+                get_parameters(self.value_list), self.config.grad_clip_norm
             )
 
             self.actor_optimizer.step()
@@ -410,6 +553,59 @@ class DayDreamer:
         train_metrics["std_targ"] = np.mean(std_targ)
 
         return train_metrics
+
+    def actorcritc_loss(self, posterior):
+        assert self.batch_size is not None, "batch_size is not set"
+        assert self.seq_len is not None, "seq_len is not set"
+
+        with torch.no_grad():
+            batched_posterior = self.RSSM.rssm_detach(
+                self.RSSM.rssm_seq_to_batch(
+                    posterior, self.batch_size, self.seq_len - 1
+                )
+            )
+
+        with FreezeParameters(self.world_list):
+            imag_rssm_states, imag_log_prob, policy_entropy = (
+                self.RSSM.rollout_imagination(
+                    self.config.horizon, self.ActionModel, batched_posterior
+                )
+            )
+
+        imag_modelstates = self.RSSM.get_model_state(imag_rssm_states)
+        with FreezeParameters(
+            self.world_list
+            + self.value_list
+            + [self.TargetValueModel]
+            + [self.DiscountModel]
+        ):
+            imag_reward_dist = self.RewardDecoder(imag_modelstates)
+            imag_reward = imag_reward_dist.mean
+            imag_value_dist = self.TargetValueModel(imag_modelstates)
+            imag_value = imag_value_dist.mean
+            discount_dist = self.DiscountModel(imag_modelstates)
+            discount_arr = self.config.discount * torch.round(
+                discount_dist.base_dist.probs
+            )  # mean = prob(disc==1)
+
+        actor_loss, discount, lambda_returns = self._actor_loss(
+            imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
+        )
+        value_loss = self._value_loss(imag_modelstates, discount, lambda_returns)
+
+        mean_target = torch.mean(lambda_returns, dim=1)
+        max_targ = torch.max(mean_target).item()
+        min_targ = torch.min(mean_target).item()
+        std_targ = torch.std(mean_target).item()
+        mean_targ = torch.mean(mean_target).item()
+        target_info = {
+            "min_targ": min_targ,
+            "max_targ": max_targ,
+            "std_targ": std_targ,
+            "mean_targ": mean_targ,
+        }
+
+        return actor_loss, value_loss, target_info
 
     def update_old(self):
         mean_value_loss = 0
