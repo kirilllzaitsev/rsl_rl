@@ -41,7 +41,7 @@ from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from torch.utils.tensorboard import SummaryWriter
 
 
-class OnPolicyRunner:
+class OffPolicyRunner:
 
     def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
 
@@ -59,7 +59,7 @@ class OnPolicyRunner:
             self.env.num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
-        self.alg: t.Union[PPO, DayDreamer] = alg_class(
+        self.alg: DayDreamer = alg_class(
             actor_critic, device=self.device, **self.alg_cfg
         )
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -108,6 +108,9 @@ class OnPolicyRunner:
         )
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
+
+        train_metrics = {}
+
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             # Rollout
@@ -147,11 +150,12 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
 
-            mean_value_loss, mean_surrogate_loss = self.alg.update()
+            train_metrics = self.alg.update(train_metrics)
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
+                self.log_metrics(train_metrics, it)
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             ep_infos.clear()
@@ -162,6 +166,14 @@ class OnPolicyRunner:
                 self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
             )
         )
+
+    def log_metrics(self, metrics, step):
+        for key, value in metrics.items():
+            if key == "mean_value_loss":
+                key = "Loss/value_function"
+            elif key == "mean_surrogate_loss":
+                key = "Loss/surrogate"
+            self.writer.add_scalar(key, value, step)
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -189,12 +201,6 @@ class OnPolicyRunner:
             / (locs["collection_time"] + locs["learn_time"])
         )
 
-        self.writer.add_scalar(
-            "Loss/value_function", locs["mean_value_loss"], locs["it"]
-        )
-        self.writer.add_scalar(
-            "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
-        )
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
