@@ -154,7 +154,7 @@ class OffPolicyRunner:
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
-                self.log(locals())
+                self.log(locals(), train_metrics=train_metrics)
                 self.log_metrics(train_metrics, it)
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
@@ -175,10 +175,11 @@ class OffPolicyRunner:
                 key = "Loss/surrogate"
             self.writer.add_scalar(key, value, step)
 
-    def log(self, locs, width=80, pad=35):
+    def log(self, locs, width=80, pad=35, train_metrics=None):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
+        train_metrics = {} if train_metrics is None else train_metrics
 
         ep_string = f""
         if locs["ep_infos"]:
@@ -200,6 +201,9 @@ class OffPolicyRunner:
             * self.env.num_envs
             / (locs["collection_time"] + locs["learn_time"])
         )
+
+        for k, v in train_metrics.items():
+            self.writer.add_scalar("Train/" + k, v, locs["it"])
 
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
@@ -236,8 +240,8 @@ class OffPolicyRunner:
                 f"""{str.center(width, ' ')}\n\n"""
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                # f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                # f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
@@ -256,6 +260,9 @@ class OffPolicyRunner:
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+
+        for k, v in train_metrics.items():
+            log_string += f"""{f'Mean {k}:':>{pad}} {v:.4f}\n"""
 
         log_string += ep_string
         log_string += (
