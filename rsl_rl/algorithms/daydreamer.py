@@ -19,73 +19,106 @@ from rsl_rl.storage import RolloutStorage
 class DreamerConfig:
     obs_shape: tuple = (1, 48)
     action_size: int = 12
-    rssm_type: str = "continuous"
+    pixel: bool = False
+    action_repeat: int = 1
+
+    capacity: int = int(1e6)
+    action_dtype: np.dtype = np.float32
+
+    seq_len: int = 50  # ?
+    batch_size: int = 50  # ?
+
+    # rssm_type: str = "continuous"
+    # rssm_info: dict = {
+    #     "deter_size": 256,
+    #     "stoch_size": 32,
+    #     "min_std": 0.01,
+    # }  # ?
+    rssm_type: str = "discrete"
     rssm_info: dict = {
-        "deter_size": 256,
-        "stoch_size": 32,
-        "min_std": 0.01,
+        "deter_size": 200,
+        "stoch_size": 20,
+        "class_size": 20,
+        "category_size": 20,
+        "min_std": 0.1,
     }  # ?
-    embedding_size: int = 64
-    rssm_node_size: int = 256  # ?
+    embedding_size: int = 200  # ?
+    rssm_node_size: int = 200  # ?
+
+    grad_clip_norm: float = 100.0
+    discount_: float = 0.99
+    lambda_: float = 0.95
+    horizon: int = 10
+
+    lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
+    loss_scale: dict = {"kl": 0.1, "reward": 1.0, "discount": 5.0}
+    kl: dict = {
+        "use_kl_balance": True,
+        "kl_balance_scale": 0.8,
+        "use_free_nats": False,
+        "free_nats": 0.0,
+    }
+
+    # ?
+    # use_slow_target: float = True
+    # slow_target_update: int = 100
+    # slow_target_fraction: float = 1.00
+
     actor: dict = {
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
+        "layers": 3,
+        "node_size": 100,
         "dist": "one_hot",
+        "min_std": 1e-4,
+        "init_std": 5,
+        "mean_scale": 5,
+        "activation": nn.ELU,
     }
     expl: dict = {
-        "train_noise": 0.3,
+        "train_noise": 0.4,
         "eval_noise": 0.0,
-        "expl_min": 0.1,
-        "expl_decay": 1000,
+        "expl_min": 0.05,
+        "expl_decay": 7000.0,
         "expl_type": "epsilon_greedy",
     }
-    reward: dict = {
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
-        "dist": "normal",
-    }
     critic: dict = {
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
+        "layers": 3,
+        "node_size": 100,
         "dist": "normal",
+        "activation": nn.ELU,
     }
-    discount: dict = {
-        "use": True,
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
-        "dist": "binary",
-    }
-    pixel: bool = False
+    actor_grad: str = "reinforce"
+    actor_grad_mix: int = 0.0
+    actor_entropy_scale: float = 1e-3
+
     obs_encoder: dict = {
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
-        "dist": "normal",
+        "layers": 3,
+        "node_size": 100,
+        "dist": None,
+        "activation": nn.ELU,
+        "kernel": 3,
+        "depth": 16,
     }
     obs_decoder: dict = {
-        "layers": 2,
-        "node_size": 256,
-        "activation": nn.ReLU,
+        "layers": 3,
+        "node_size": 100,
         "dist": "normal",
+        "activation": nn.ELU,
+        "kernel": 3,
+        "depth": 16,
     }
-
-    actor_grad: str = "reinforce"
-    actor_entropy_scale: float = 0.01
-    lambda_: float = 0.95
-    grad_clip_norm: float = 100.0
-
-    lr: dict = {
-        "model": 1e-3,
-        "actor": 1e-4,
-        "critic": 1e-4,
+    reward: dict = {
+        "layers": 3,
+        "node_size": 100,
+        "dist": "normal",
+        "activation": nn.ELU,
     }
-
-    horizon: int = 10
-    discount_: float = 0.99
+    discount: dict = {
+        "layers": 3,
+        "node_size": 100,
+        "dist": "binary",
+        "activation": nn.ELU,
+        "use": True,
+    }
 
 
 class DayDreamer:
@@ -146,15 +179,9 @@ class DayDreamer:
         self.dreamer_config = DreamerConfig()
         self._model_initialize(self.dreamer_config)
         self._optim_initialize(self.dreamer_config)
-        self.kl_info = dict(
-            use_kl_balance=True,
-            kl_balance_scale=0.5,
-            use_free_nats=True,
-            free_nats=3,
-        )
-        self.loss_scale = {"kl": 1.0, "discount": 0.1}
         self.batch_size = None
         self.seq_len = None
+        self.kl_info = self.dreamer_config.kl
 
     def _model_initialize(self, config: DreamerConfig):
         obs_shape = config.obs_shape
@@ -246,10 +273,10 @@ class DayDreamer:
         prior_dist, post_dist, div = self._kl_loss(prior, posterior)
 
         model_loss = (
-            self.loss_scale["kl"] * div
+            self.dreamer_config.loss_scale["kl"] * div
             + reward_loss
             + obs_loss
-            + self.loss_scale["discount"] * pcont_loss
+            + self.dreamer_config.loss_scale["discount"] * pcont_loss
         )
         return (
             model_loss,
@@ -307,7 +334,9 @@ class DayDreamer:
         actor_loss = -torch.sum(
             torch.mean(
                 discount
-                * (objective + self.dreamer_config.actor_entropy_scale * policy_entropy),
+                * (
+                    objective + self.dreamer_config.actor_entropy_scale * policy_entropy
+                ),
                 dim=1,
             )
         )
@@ -448,7 +477,7 @@ class DayDreamer:
         std_targ = []
 
         if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator(
+            generator = self.storage.reccurent_mini_batch_generator_dreamer(
                 self.num_mini_batches, self.num_learning_epochs
             )
         else:
@@ -477,14 +506,10 @@ class DayDreamer:
             actions = torch.tensor(actions, dtype=torch.float32).to(
                 self.device
             )  # t-1, t+seq_len-1
-            rewards = (
-                torch.tensor(rewards, dtype=torch.float32).to(self.device)
+            rewards = torch.tensor(rewards, dtype=torch.float32).to(
+                self.device
             )  # t-1 to t+seq_len-1
-            nonterms = (
-                torch.tensor(1 - terms, dtype=torch.float32)
-                .to(self.device)
-                
-            )  # t-1 to t+seq_len-1
+            nonterms = 1 - terms
 
             (
                 model_loss,
@@ -540,7 +565,6 @@ class DayDreamer:
             max_targ.append(target_info["max_targ"])
             std_targ.append(target_info["std_targ"])
 
-        num_updates = self.num_learning_epochs * self.num_mini_batches
         train_metrics["model_loss"] = np.mean(model_l)
         train_metrics["kl_loss"] = np.mean(kl_l)
         train_metrics["reward_loss"] = np.mean(reward_l)
