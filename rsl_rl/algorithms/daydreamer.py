@@ -57,7 +57,7 @@ class DreamerConfig:
         "layers": 2,
         "node_size": 256,
         "activation": nn.ReLU,
-        "dist": "normal",
+        "dist": "binary",
     }
     pixel: bool = False
     obs_encoder: dict = {
@@ -143,8 +143,9 @@ class DayDreamer:
         #     batch_size=batch_size,
         #     model_dir=model_dir,
         # )
-        self.config = DreamerConfig()
-        self._model_initialize(self.config)
+        self.dreamer_config = DreamerConfig()
+        self._model_initialize(self.dreamer_config)
+        self._optim_initialize(self.dreamer_config)
         self.kl_info = dict(
             use_kl_balance=True,
             kl_balance_scale=0.5,
@@ -220,15 +221,16 @@ class DayDreamer:
     def representation_loss(self, obs, actions, rewards, nonterms):
 
         embed = self.ObsEncoder(obs)  # t to t+seq_len
+        embed = embed.sample()
 
-        batch_size = obs.shape[0]
+        batch_size = obs.shape[1]
         if self.batch_size is None:
             self.batch_size = batch_size
         prev_rssm_state = self.RSSM._init_rssm_state(batch_size)
 
-        seq_len = obs.shape[1]
+        seq_len = obs.shape[0]
         if self.seq_len is None:
-            self.seq_len = obs.shape[1]
+            self.seq_len = seq_len
         prior, posterior = self.RSSM.rollout_observation(
             seq_len, embed, actions, nonterms, prev_rssm_state
         )
@@ -287,14 +289,14 @@ class DayDreamer:
             imag_value[:-1],
             discount_arr[:-1],
             bootstrap=imag_value[-1],
-            lambda_=self.config.lambda_,
+            lambda_=self.dreamer_config.lambda_,
         )
 
-        if self.config.actor_grad == "reinforce":
+        if self.dreamer_config.actor_grad == "reinforce":
             advantage = (lambda_returns - imag_value[:-1]).detach()
             objective = imag_log_prob[1:].unsqueeze(-1) * advantage
 
-        elif self.config.actor_grad == "dynamics":
+        elif self.dreamer_config.actor_grad == "dynamics":
             objective = lambda_returns
         else:
             raise NotImplementedError
@@ -305,7 +307,7 @@ class DayDreamer:
         actor_loss = -torch.sum(
             torch.mean(
                 discount
-                * (objective + self.config.actor_entropy_scale * policy_entropy),
+                * (objective + self.dreamer_config.actor_entropy_scale * policy_entropy),
                 dim=1,
             )
         )
@@ -450,7 +452,7 @@ class DayDreamer:
                 self.num_mini_batches, self.num_learning_epochs
             )
         else:
-            generator = self.storage.mini_batch_generator(
+            generator = self.storage.mini_batch_generator_dreamer(
                 self.num_mini_batches, self.num_learning_epochs
             )
         for (
@@ -469,19 +471,19 @@ class DayDreamer:
             obs = obs_batch
             rewards = returns_batch
             actions = actions_batch
-            terms = torch.zeros_like(rewards)
+            terms = torch.zeros((obs.shape[0], obs.shape[1], 1)).to(self.device)
             # obs, actions, rewards, terms = self.buffer.sample()
             obs = torch.tensor(obs, dtype=torch.float32).to(self.device)  # t, t+seq_len
             actions = torch.tensor(actions, dtype=torch.float32).to(
                 self.device
             )  # t-1, t+seq_len-1
             rewards = (
-                torch.tensor(rewards, dtype=torch.float32).to(self.device).unsqueeze(-1)
+                torch.tensor(rewards, dtype=torch.float32).to(self.device)
             )  # t-1 to t+seq_len-1
             nonterms = (
                 torch.tensor(1 - terms, dtype=torch.float32)
                 .to(self.device)
-                .unsqueeze(-1)
+                
             )  # t-1 to t+seq_len-1
 
             (
@@ -498,7 +500,7 @@ class DayDreamer:
             self.model_optimizer.zero_grad()
             model_loss.backward()
             grad_norm_model = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.world_list), self.config.grad_clip_norm
+                get_parameters(self.world_list), self.dreamer_config.grad_clip_norm
             )
             self.model_optimizer.step()
 
@@ -511,10 +513,10 @@ class DayDreamer:
             value_loss.backward()
 
             grad_norm_actor = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.actor_list), self.config.grad_clip_norm
+                get_parameters(self.actor_list), self.dreamer_config.grad_clip_norm
             )
             grad_norm_value = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.value_list), self.config.grad_clip_norm
+                get_parameters(self.value_list), self.dreamer_config.grad_clip_norm
             )
 
             self.actor_optimizer.step()
@@ -538,6 +540,7 @@ class DayDreamer:
             max_targ.append(target_info["max_targ"])
             std_targ.append(target_info["std_targ"])
 
+        num_updates = self.num_learning_epochs * self.num_mini_batches
         train_metrics["model_loss"] = np.mean(model_l)
         train_metrics["kl_loss"] = np.mean(kl_l)
         train_metrics["reward_loss"] = np.mean(reward_l)
@@ -551,6 +554,8 @@ class DayDreamer:
         train_metrics["min_targ"] = np.mean(min_targ)
         train_metrics["max_targ"] = np.mean(max_targ)
         train_metrics["std_targ"] = np.mean(std_targ)
+
+        self.storage.clear()
 
         return train_metrics
 
@@ -568,7 +573,7 @@ class DayDreamer:
         with FreezeParameters(self.world_list):
             imag_rssm_states, imag_log_prob, policy_entropy = (
                 self.RSSM.rollout_imagination(
-                    self.config.horizon, self.ActionModel, batched_posterior
+                    self.dreamer_config.horizon, self.ActionModel, batched_posterior
                 )
             )
 
@@ -584,7 +589,7 @@ class DayDreamer:
             imag_value_dist = self.TargetValueModel(imag_modelstates)
             imag_value = imag_value_dist.mean
             discount_dist = self.DiscountModel(imag_modelstates)
-            discount_arr = self.config.discount * torch.round(
+            discount_arr = self.dreamer_config.discount_ * torch.round(
                 discount_dist.base_dist.probs
             )  # mean = prob(disc==1)
 
