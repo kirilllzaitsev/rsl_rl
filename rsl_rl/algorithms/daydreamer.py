@@ -36,14 +36,14 @@ class DreamerConfig:
     # }  # ?
     rssm_type: str = "discrete"
     rssm_info: dict = {
-        "deter_size": 200,
+        "deter_size": 128,
         "stoch_size": 20,
         "class_size": 20,
         "category_size": 20,
         "min_std": 0.1,
-    }  # ?
-    embedding_size: int = 200  # ?
-    rssm_node_size: int = 200  # ?
+    }
+    embedding_size: int = 128
+    rssm_node_size: int = 128
 
     grad_clip_norm: float = 100.0
     discount_: float = 0.99
@@ -65,8 +65,8 @@ class DreamerConfig:
     # slow_target_fraction: float = 1.00
 
     actor: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": "one_hot",
         "min_std": 1e-4,
         "init_std": 5,
@@ -81,8 +81,8 @@ class DreamerConfig:
         "expl_type": "epsilon_greedy",
     }
     critic: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": "normal",
         "activation": nn.ELU,
     }
@@ -91,30 +91,30 @@ class DreamerConfig:
     actor_entropy_scale: float = 1e-3
 
     obs_encoder: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": None,
         "activation": nn.ELU,
         "kernel": 3,
         "depth": 16,
     }
     obs_decoder: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": "normal",
         "activation": nn.ELU,
         "kernel": 3,
         "depth": 16,
     }
     reward: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": "normal",
         "activation": nn.ELU,
     }
     discount: dict = {
-        "layers": 3,
-        "node_size": 100,
+        "layers": 2,
+        "node_size": 64,
         "dist": "binary",
         "activation": nn.ELU,
         "use": True,
@@ -248,7 +248,10 @@ class DayDreamer:
     def representation_loss(self, obs, actions, rewards, nonterms):
 
         embed = self.ObsEncoder(obs)  # t to t+seq_len
-        embed = embed.sample()
+        try:
+            embed = embed.sample()
+        except:
+            pass
 
         batch_size = obs.shape[1]
         if self.batch_size is None:
@@ -502,11 +505,11 @@ class DayDreamer:
             actions = actions_batch
             terms = torch.zeros((obs.shape[0], obs.shape[1], 1)).to(self.device)
             # obs, actions, rewards, terms = self.buffer.sample()
-            obs = torch.tensor(obs, dtype=torch.float32).to(self.device)  # t, t+seq_len
-            actions = torch.tensor(actions, dtype=torch.float32).to(
+            obs = obs.to(self.device)  # t, t+seq_len
+            actions = actions.to(
                 self.device
             )  # t-1, t+seq_len-1
-            rewards = torch.tensor(rewards, dtype=torch.float32).to(
+            rewards = rewards.to(
                 self.device
             )  # t-1 to t+seq_len-1
             nonterms = 1 - terms
