@@ -279,7 +279,13 @@ class RolloutStorage:
             yield (
                 obs_batch.reshape(self.num_transitions_per_env, -1, *self.obs_shape),
                 critic_obs_batch.reshape(
-                    self.num_transitions_per_env, -1, *(self.privileged_obs_shape if self.privileged_observations is not None else self.obs_shape)
+                    self.num_transitions_per_env,
+                    -1,
+                    *(
+                        self.privileged_obs_shape
+                        if self.privileged_observations is not None
+                        else self.obs_shape
+                    )
                 ),
                 actions_batch.reshape(
                     self.num_transitions_per_env, -1, *self.actions_shape
@@ -369,3 +375,45 @@ class RolloutStorage:
                 ), masks_batch
 
                 first_traj = last_traj
+
+    def reccurent_mini_batch_generator_dreamer(self, num_mini_batches, num_epochs=8):
+        for (
+            obs_batch,
+            critic_obs_batch,
+            actions_batch,
+            target_values_batch,
+            advantages_batch,
+            returns_batch,
+            old_actions_log_prob_batch,
+            old_mu_batch,
+            old_sigma_batch,
+            hid_states_batch,
+            masks_batch,
+        ) in self.reccurent_mini_batch_generator(num_mini_batches, num_epochs):
+            yield (
+                obs_batch.reshape(self.num_transitions_per_env, -1, *self.obs_shape),
+                critic_obs_batch.reshape(
+                    self.num_transitions_per_env,
+                    -1,
+                    *(
+                        self.privileged_obs_shape
+                        if self.privileged_observations is not None
+                        else self.obs_shape
+                    )
+                ),
+                actions_batch.reshape(
+                    self.num_transitions_per_env, -1, *self.actions_shape
+                ),
+                target_values_batch.reshape(self.num_transitions_per_env, -1, 1),
+                advantages_batch.reshape(self.num_transitions_per_env, -1, 1),
+                returns_batch.reshape(self.num_transitions_per_env, -1, 1),
+                old_actions_log_prob_batch.reshape(self.num_transitions_per_env, -1, 1),
+                old_mu_batch.reshape(
+                    self.num_transitions_per_env, -1, *self.actions_shape
+                ),
+                old_sigma_batch.reshape(
+                    self.num_transitions_per_env, -1, *self.actions_shape
+                ),
+                hid_states_batch,
+                masks_batch,
+            )
