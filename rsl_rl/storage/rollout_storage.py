@@ -432,7 +432,7 @@ class ReplayBuffer(object):
         self,
         num_envs,
         num_transitions_per_env,
-        observation_shape,
+        observation_size,
         action_size,
         device,
     ):
@@ -441,13 +441,13 @@ class ReplayBuffer(object):
 
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
-        self.observation_shape = observation_shape
+        self.observation_size = observation_size
         self.observation = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, *observation_shape),
+            (self.num_transitions_per_env, self.num_envs, observation_size),
             device=self.device,
         )
         self.next_observation = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, *observation_shape),
+            (self.num_transitions_per_env, self.num_envs, observation_size),
             device=self.device,
         )
         self.action = torch.zeros(
