@@ -232,25 +232,24 @@ class DayDreamer:
 
     @torch.no_grad()
     def environment_interaction(self, env, num_interaction_episodes, train=True):
-        for epi in range(num_interaction_episodes):
-            posterior, deterministic = self.rssm.recurrent_model_input_init(1)
-            action = torch.zeros(1, self.action_size).to(self.device)
+        for episode in range(num_interaction_episodes):
 
-            observation = env.reset()
-            embedded_observation = self.encoder(
-                torch.from_numpy(observation).float().to(self.device)
-            )
+            observation, _ = env.reset()
+            embedded_observation = self.encoder(observation)
+            batch_size = embedded_observation.shape[0]
 
-            score = 0
-            score_lst = np.array([])
+            posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
+            action = torch.zeros(batch_size, self.action_size).to(self.device)
+
+            score_lst = []
             done = False
 
             while not done:
-                deterministic = self.RSSM.recurrent_model(
+                deterministic = self.rssm.recurrent_model(
                     posterior, action, deterministic
                 )
-                embedded_observation = embedded_observation.reshape(1, -1)
-                _, posterior = self.RSSM.representation_model(
+                embedded_observation = embedded_observation.reshape(batch_size, -1)
+                _, posterior = self.rssm.representation_model(
                     embedded_observation, deterministic
                 )
                 action = self.actor(posterior, deterministic).detach()
@@ -260,32 +259,40 @@ class DayDreamer:
                     env_action = buffer_action.argmax()
 
                 else:
-                    buffer_action = action.cpu().numpy()[0]
+                    buffer_action = action
                     env_action = buffer_action
 
-                next_observation, reward, done, info = env.step(env_action)
+                next_observation, privileged_next_observation, reward, done, info = (
+                    env.step(env_action)
+                )
+                # no need for this in model-based RL?!
+                # Bootstrapping on time outs
+                # if "time_outs" in info:
+                #     reward += self.gamma * torch.squeeze(
+                #         values
+                #         * info["time_outs"].unsqueeze(1).to(self.device),
+                #         1,
+                #     )
                 if train:
                     self.buffer.add(
                         observation, buffer_action, reward, next_observation, done
                     )
-                score += reward
-                embedded_observation = self.encoder(
-                    torch.from_numpy(next_observation).float().to(self.device)
-                )
+                score_lst.append(reward.mean())
+                embedded_observation = self.encoder(next_observation)
                 observation = next_observation
-                if done:
+                # wait for all envs to finish
+                # questionable. the rest will propagate although in terminal states
+                # likely just do the fixed number of steps and exit with whatever is in the buffer up to that point
+                if all(done):
                     if train:
-                        self.num_total_episode += 1
-                        self.writer.add_scalar(
-                            "training score", score, self.num_total_episode
-                        )
-                    else:
-                        score_lst = np.append(score_lst, score)
+                        score = np.mean(score_lst)
+                        self.num_total_episodes += 1
+                        print(f"episode {self.num_total_episodes} score: {score}")
                     break
         if not train:
-            evaluate_score = score_lst.mean()
+            evaluate_score = np.mean(score_lst)
             print("evaluate score : ", evaluate_score)
-            self.writer.add_scalar("test score", evaluate_score, self.num_total_episode)
+            print("test score", evaluate_score, self.num_total_episodes)
             return evaluate_score
 
     def update_dreamer_v1(self, train_metrics) -> dict:
