@@ -5,10 +5,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import yaml
+from attrdict import AttrDict
+from dreamer.modules.actor import Actor
+from dreamer.modules.critic import Critic
+from dreamer.modules.decoder import Decoder
+from dreamer.modules.encoder import Encoder
+from dreamer.modules.model import RSSM, ContinueModel, RewardModel
+from dreamer.utils.utils import load_config
 from dreamerv2.models.actor import DiscreteActionModel
 from dreamerv2.models.dense import DenseModel
 from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
-from dreamerv2.models.rssm import RSSM
+from dreamerv2.models.rssm import RSSM as Dreamerv2RSSM
 from dreamerv2.training.trainer import Trainer as DreamerTrainer
 from dreamerv2.utils.algorithm import compute_return
 from dreamerv2.utils.module import FreezeParameters, get_parameters
@@ -138,7 +146,6 @@ class DayDreamer:
 
         # PPO components
         self.storage = None  # initialized later
-        self.transition = RolloutStorage.Transition()
 
         # PPO parameters
         self.num_learning_epochs = num_learning_epochs
@@ -157,6 +164,12 @@ class DayDreamer:
             )
         )
 
+        self.discrete_action_bool = False
+        config_path = "/media/master/wext/msc_studies/fourth_semester/robot_learning/project/related_work/SimpleDreamer/dreamer/configs/leggedgym-quadruped-walk.yml"
+        with open(config_path) as f:
+            self.config = AttrDict(yaml.load(f, Loader=yaml.FullLoader))
+        self.num_total_episodes = 0
+
     def init_storage(
         self,
         num_envs,
@@ -166,12 +179,38 @@ class DayDreamer:
         action_shape,
     ):
         # actor_obs_shape vs critic_obs_shape?
+        assert len(action_shape) == 1
+        self.action_size = action_shape[0]
         self.buffer = ReplayBuffer(
-            actor_obs_shape,
-            action_size=action_shape.squeeze(),
+            num_envs=num_envs,
+            num_transitions_per_env=num_transitions_per_env,
+            observation_shape=actor_obs_shape,
+            action_size=self.action_size,
             device=self.device,
-            capacity=num_envs * num_transitions_per_env,
         )
+        observation_shape = actor_obs_shape
+        self.encoder = DenseModel(
+            (self.dreamer_config.embedding_size,),
+            int(np.prod(self.dreamer_config.obs_shape)),
+            self.dreamer_config.obs_encoder,
+        ).to(self.device)
+        # modelstate_size = stoch_size + deter_size
+        self.modelstate_size = (
+            self.dreamer_config.rssm_info["stoch_size"]
+            + self.dreamer_config.rssm_info["deter_size"]
+        )
+        self.decoder = DenseModel(
+            self.dreamer_config.obs_shape,
+            self.modelstate_size,
+            self.dreamer_config.obs_decoder,
+        ).to(self.device)
+        self.rssm = RSSM(self.action_size, self.config).to(self.device)
+        self.reward_predictor = RewardModel(self.config).to(self.device)
+        self.continue_predictor = ContinueModel(self.config).to(self.device)
+        self.actor = Actor(self.discrete_action_bool, self.action_size, self.config).to(
+            self.device
+        )
+        self.critic = Critic(self.config).to(self.device)
 
     def act(self, obs, critic_obs):
         # returns actions
