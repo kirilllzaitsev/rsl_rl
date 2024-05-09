@@ -479,8 +479,9 @@ class ReplayBuffer(object):
 
     # TODO: should be sampled at random from the buffer (which by itself contains more than the specified number of transitions. it should represent the whole history or at least approximate it)
     def sample(self, num_mini_batches):
-        # just a copy of the PPO mini_batch_generator
-        batch_size = self.num_envs * self.num_transitions_per_env
+        # return batch_size x seq_size x X
+        # seq_size is critical for dreamer (the bigger the better)
+        batch_size = self.num_envs
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(
             num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
@@ -497,11 +498,11 @@ class ReplayBuffer(object):
         end = (i + 1) * mini_batch_size
         batch_idx = indices[start:end]
 
-        obs_batch = observations[batch_idx]
-        next_obs_batch = next_observations[batch_idx]
-        actions_batch = actions[batch_idx]
-        rewards_batch = rewards[batch_idx]
-        dones_batch = dones[batch_idx]
+        obs_batch = self.observation[:, batch_idx].transpose(0, 1)
+        next_obs_batch = self.next_observation[:, batch_idx].transpose(0, 1)
+        actions_batch = self.action[:, batch_idx].transpose(0, 1)
+        rewards_batch = self.reward[:, batch_idx].transpose(0, 1)
+        dones_batch = self.done[:, batch_idx].transpose(0, 1)
 
         batch = {
             "observation": obs_batch,
