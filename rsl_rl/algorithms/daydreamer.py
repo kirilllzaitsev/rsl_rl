@@ -1,4 +1,5 @@
 import argparse
+from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,7 +13,12 @@ from dreamer.modules.critic import Critic
 from dreamer.modules.decoder import Decoder
 from dreamer.modules.encoder import Encoder
 from dreamer.modules.model import RSSM, ContinueModel, RewardModel
-from dreamer.utils.utils import load_config
+from dreamer.utils.utils import (
+    DynamicInfos,
+    compute_lambda_values,
+    create_normal_dist,
+    load_config,
+)
 from dreamerv2.models.actor import DiscreteActionModel
 from dreamerv2.models.dense import DenseModel
 from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
@@ -23,6 +29,7 @@ from dreamerv2.utils.module import FreezeParameters, get_parameters
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
+from tqdm.auto import tqdm
 
 
 class DreamerConfig:
@@ -121,6 +128,12 @@ class DreamerConfig:
         "dist": "normal",
         "activation": nn.ELU,
     }
+    continue_: dict = {
+        "layers": 3,
+        "node_size": 64,
+        "dist": "normal",
+        "activation": nn.ELU,
+    }
     discount: dict = {
         "layers": 2,
         "node_size": 64,
@@ -156,39 +169,16 @@ class DayDreamer:
         self.seq_len = None
         self.kl_info = self.dreamer_config.kl
 
-        self.config = argparse.Namespace(
-            **dict(
-                collect_interval=100,
-                batch_size=50,
-                batch_length=50,
-            )
-        )
-
+        # following SimpleDreamer
+        self.action_size = self.dreamer_config.action_size
         self.discrete_action_bool = False
         config_path = "/media/master/wext/msc_studies/fourth_semester/robot_learning/project/related_work/SimpleDreamer/dreamer/configs/leggedgym-quadruped-walk.yml"
         with open(config_path) as f:
             self.config = AttrDict(yaml.load(f, Loader=yaml.FullLoader))
         self.num_total_episodes = 0
+        for k, v in self.config.parameters.dreamer.items():
+            setattr(self.config, k, v)
 
-    def init_storage(
-        self,
-        num_envs,
-        num_transitions_per_env,
-        actor_obs_shape,
-        critic_obs_shape,
-        action_shape,
-    ):
-        # actor_obs_shape vs critic_obs_shape?
-        assert len(action_shape) == 1
-        self.action_size = action_shape[0]
-        self.buffer = ReplayBuffer(
-            num_envs=num_envs,
-            num_transitions_per_env=num_transitions_per_env,
-            observation_shape=actor_obs_shape,
-            action_size=self.action_size,
-            device=self.device,
-        )
-        observation_shape = actor_obs_shape
         self.encoder = DenseModel(
             (self.dreamer_config.embedding_size,),
             int(np.prod(self.dreamer_config.obs_shape)),
@@ -205,12 +195,69 @@ class DayDreamer:
             self.dreamer_config.obs_decoder,
         ).to(self.device)
         self.rssm = RSSM(self.action_size, self.config).to(self.device)
-        self.reward_predictor = RewardModel(self.config).to(self.device)
-        self.continue_predictor = ContinueModel(self.config).to(self.device)
+        self.reward_predictor = RewardModel(
+            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+            hidden_size=self.dreamer_config.reward["node_size"],
+            num_layers=self.dreamer_config.reward["num_layers"],
+            activation=self.dreamer_config.reward["activation"],
+        ).to(self.device)
+        self.continue_predictor = ContinueModel(
+            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+            hidden_size=self.dreamer_config.continue_["node_size"],
+            num_layers=self.dreamer_config.continue_["num_layers"],
+            activation=self.dreamer_config.continue_["activation"],
+        ).to(self.device)
         self.actor = Actor(self.discrete_action_bool, self.action_size, self.config).to(
             self.device
         )
         self.critic = Critic(self.config).to(self.device)
+
+        self.dynamic_learning_infos = DynamicInfos(self.device)
+        self.behavior_learning_infos = DynamicInfos(self.device)
+
+        self.continue_criterion = nn.BCELoss()
+
+        # optimizer
+        self.model_params = (
+            list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+            + list(self.rssm.parameters())
+            + list(self.reward_predictor.parameters())
+        )
+        if self.config.parameters.dreamer.use_continue_flag:
+            self.model_params += list(self.continue_predictor.parameters())
+
+        self.model_optimizer = torch.optim.Adam(
+            self.model_params, lr=self.config.parameters.dreamer.model_learning_rate
+        )
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(),
+            lr=self.config.parameters.dreamer.actor_learning_rate,
+        )
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(),
+            lr=self.config.parameters.dreamer.critic_learning_rate,
+        )
+
+    def init_storage(
+        self,
+        num_envs,
+        num_transitions_per_env,
+        actor_obs_shape,
+        critic_obs_shape,
+        action_shape,
+    ):
+        # actor_obs_shape vs critic_obs_shape?
+        self.num_transitions_per_env = num_transitions_per_env
+        self.buffer = ReplayBuffer(
+            num_envs=num_envs,
+            num_transitions_per_env=num_transitions_per_env,
+            observation_size=int(np.prod(self.dreamer_config.obs_shape)),
+            action_size=self.action_size,
+            device=self.device,
+        )
 
     def act(self, obs, critic_obs):
         # returns actions
@@ -220,15 +267,205 @@ class DayDreamer:
         # add data to buffer
         raise NotImplementedError
 
-    def update(self, train_metrics) -> dict:
+    def update(self) -> dict:
         """
         trains the world model and imagination actor and critic for collect_interval times using sequence-batch data from buffer
         dynamic learning + behavior learning
         """
+        # TODO: what is batch length in this case? A:seq_len
         # self.num_steps_per_env
-        for collect_interval in range(self.config.collect_interval):
-            data = self.buffer.sample(self.config.batch_size, self.config.batch_length)
-        raise NotImplementedError
+        behavior_losses = defaultdict(list)
+        dynamic_losses = defaultdict(list)
+        for collect_interval in tqdm(range(self.config.collect_interval)):
+            data = self.buffer.sample(num_mini_batches=1)
+            dynamic_learning_res = self.dynamic_learning(data)
+            posteriors = dynamic_learning_res["posteriors"]
+            deterministics = dynamic_learning_res["deterministics"]
+            dynamic_losses_batch = dynamic_learning_res["losses"]
+            behavior_losses_batch = self.behavior_learning(posteriors, deterministics)
+            for k, v in dynamic_losses_batch.items():
+                dynamic_losses[k].append(v)
+            for k, v in behavior_losses_batch.items():
+                behavior_losses[k].append(v)
+        return {
+            "dynamic_loss": dynamic_losses,
+            "behavior_loss": behavior_losses,
+        }
+
+    def dynamic_learning(self, data):
+        prior, deterministic = self.rssm.recurrent_model_input_init(len(data.action))
+
+        data.embedded_observation = self.encoder(data.observation)
+
+        # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
+        for t in range(1, self.num_transitions_per_env):
+            deterministic = self.rssm.recurrent_model(
+                prior, data.action[:, t - 1], deterministic
+            )
+            prior_dist, prior = self.rssm.transition_model(deterministic)
+            posterior_dist, posterior = self.rssm.representation_model(
+                data.embedded_observation[:, t], deterministic
+            )
+
+            self.dynamic_learning_infos.append(
+                priors=prior,
+                prior_dist_means=prior_dist.mean,
+                prior_dist_stds=prior_dist.scale,
+                posteriors=posterior,
+                posterior_dist_means=posterior_dist.mean,
+                posterior_dist_stds=posterior_dist.scale,
+                deterministics=deterministic,
+            )
+
+            prior = posterior
+
+        infos = self.dynamic_learning_infos.get_stacked()
+        losses = self._model_update(data, infos)
+        # return infos.posteriors.detach(), infos.deterministics.detach()
+        return {
+            "posteriors": infos.posteriors.detach(),
+            "deterministics": infos.deterministics.detach(),
+            "losses": losses,
+        }
+
+    def _model_update(self, data, posterior_info):
+        reconstructed_observation_dist = self.decoder(
+            torch.cat(
+                (
+                    posterior_info.deterministics,
+                    posterior_info.posteriors,
+                ),
+                dim=-1,
+            )
+        )
+        reconstruction_observation_loss = reconstructed_observation_dist.log_prob(
+            data.observation[:, 1:]
+        )
+        if self.config.use_continue_flag:
+            continue_dist = self.continue_predictor(
+                posterior_info.posteriors, posterior_info.deterministics
+            )
+            continue_loss = self.continue_criterion(
+                continue_dist.probs, 1 - data.done[:, 1:]
+            )
+
+        reward_dist = self.reward_predictor(
+            posterior_info.posteriors, posterior_info.deterministics
+        )
+        reward_loss = reward_dist.log_prob(data.reward[:, 1:])
+
+        prior_dist = create_normal_dist(
+            posterior_info.prior_dist_means,
+            posterior_info.prior_dist_stds,
+            event_shape=1,
+        )
+        posterior_dist = create_normal_dist(
+            posterior_info.posterior_dist_means,
+            posterior_info.posterior_dist_stds,
+            event_shape=1,
+        )
+        kl_divergence_loss = torch.mean(
+            torch.distributions.kl.kl_divergence(posterior_dist, prior_dist)
+        )
+        kl_divergence_loss = torch.max(
+            torch.tensor(self.config.free_nats).to(self.device), kl_divergence_loss
+        )
+        model_loss = (
+            self.config.kl_divergence_scale * kl_divergence_loss
+            - reconstruction_observation_loss.mean()
+            - reward_loss.mean()
+        )
+        if self.config.use_continue_flag:
+            model_loss += continue_loss.mean()
+
+        self.model_optimizer.zero_grad()
+        model_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.model_params,
+            self.config.clip_grad,
+            norm_type=self.config.grad_norm_type,
+        )
+        self.model_optimizer.step()
+        losses = {
+            "reconstruction_observation_loss": reconstruction_observation_loss.mean().item(),
+            "reward_loss": reward_loss.mean().item(),
+            "kl_divergence_loss": kl_divergence_loss.item(),
+            "model_loss": model_loss.item(),
+        }
+        return losses
+
+    def behavior_learning(self, states, deterministics):
+        """
+        #TODO : last posterior truncation(last can be last step)
+        posterior shape : (batch, timestep, stochastic)
+        """
+        state = states.reshape(-1, self.config.stochastic_size)
+        deterministic = deterministics.reshape(-1, self.config.deterministic_size)
+
+        # continue_predictor reinit
+        for t in range(self.config.horizon_length):
+            action = self.actor(state, deterministic)
+            deterministic = self.rssm.recurrent_model(state, action, deterministic)
+            _, state = self.rssm.transition_model(deterministic)
+            self.behavior_learning_infos.append(
+                priors=state, deterministics=deterministic
+            )
+
+        losses = self._agent_update(self.behavior_learning_infos.get_stacked())
+        return losses
+
+    def _agent_update(self, behavior_learning_infos):
+        predicted_rewards = self.reward_predictor(
+            behavior_learning_infos.priors, behavior_learning_infos.deterministics
+        ).mean
+        values = self.critic(
+            behavior_learning_infos.priors, behavior_learning_infos.deterministics
+        ).mean
+
+        if self.config.use_continue_flag:
+            continues = self.continue_predictor(
+                behavior_learning_infos.priors, behavior_learning_infos.deterministics
+            ).mean
+        else:
+            continues = self.config.discount * torch.ones_like(values)
+
+        lambda_values = compute_lambda_values(
+            predicted_rewards,
+            values,
+            continues,
+            self.config.horizon_length,
+            self.device,
+            self.config.lambda_,
+        )
+
+        actor_loss = -torch.mean(lambda_values)
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.actor.parameters(),
+            self.config.clip_grad,
+            norm_type=self.config.grad_norm_type,
+        )
+        self.actor_optimizer.step()
+
+        value_dist = self.critic(
+            behavior_learning_infos.priors.detach()[:, :-1],
+            behavior_learning_infos.deterministics.detach()[:, :-1],
+        )
+        value_loss = -torch.mean(value_dist.log_prob(lambda_values.detach()))
+
+        self.critic_optimizer.zero_grad()
+        value_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.critic.parameters(),
+            self.config.clip_grad,
+            norm_type=self.config.grad_norm_type,
+        )
+        self.critic_optimizer.step()
+
+        losses = {"actor_loss": actor_loss.item(), "value_loss": value_loss.item()}
+        return losses
 
     @torch.no_grad()
     def environment_interaction(self, env, num_interaction_episodes, train=True):
@@ -244,51 +481,45 @@ class DayDreamer:
             score_lst = []
             done = False
 
-            while not done:
-                deterministic = self.rssm.recurrent_model(
-                    posterior, action, deterministic
-                )
-                embedded_observation = embedded_observation.reshape(batch_size, -1)
-                _, posterior = self.rssm.representation_model(
-                    embedded_observation, deterministic
-                )
-                action = self.actor(posterior, deterministic).detach()
+            deterministic = self.rssm.recurrent_model(posterior, action, deterministic)
+            embedded_observation = embedded_observation.reshape(batch_size, -1)
+            _, posterior = self.rssm.representation_model(
+                embedded_observation, deterministic
+            )
+            action = self.actor(posterior, deterministic).detach()
 
-                if self.discrete_action_bool:
-                    buffer_action = action.cpu().numpy()
-                    env_action = buffer_action.argmax()
+            if self.discrete_action_bool:
+                buffer_action = action.cpu().numpy()
+                env_action = buffer_action.argmax()
 
-                else:
-                    buffer_action = action
-                    env_action = buffer_action
+            else:
+                buffer_action = action
+                env_action = buffer_action
 
-                next_observation, privileged_next_observation, reward, done, info = (
-                    env.step(env_action)
+            next_observation, privileged_next_observation, reward, done, info = (
+                env.step(env_action)
+            )
+            # no need for this in model-based RL?!
+            # Bootstrapping on time outs
+            # if "time_outs" in info:
+            #     reward += self.gamma * torch.squeeze(
+            #         values
+            #         * info["time_outs"].unsqueeze(1).to(self.device),
+            #         1,
+            #     )
+            if train:
+                self.buffer.add(
+                    observation, buffer_action, reward, next_observation, done
                 )
-                # no need for this in model-based RL?!
-                # Bootstrapping on time outs
-                # if "time_outs" in info:
-                #     reward += self.gamma * torch.squeeze(
-                #         values
-                #         * info["time_outs"].unsqueeze(1).to(self.device),
-                #         1,
-                #     )
-                if train:
-                    self.buffer.add(
-                        observation, buffer_action, reward, next_observation, done
-                    )
-                score_lst.append(reward.mean())
-                embedded_observation = self.encoder(next_observation)
-                observation = next_observation
-                # wait for all envs to finish
-                # questionable. the rest will propagate although in terminal states
-                # likely just do the fixed number of steps and exit with whatever is in the buffer up to that point
-                if all(done):
-                    if train:
-                        score = np.mean(score_lst)
-                        self.num_total_episodes += 1
-                        print(f"episode {self.num_total_episodes} score: {score}")
-                    break
+            score_lst.append(reward.mean().item())
+            embedded_observation = self.encoder(next_observation)
+            observation = next_observation
+
+            if train:
+                score = np.mean(score_lst)
+                self.num_total_episodes += 1
+                print(f"episode {self.num_total_episodes} score: {score}")
+
         if not train:
             evaluate_score = np.mean(score_lst)
             print("evaluate score : ", evaluate_score)
