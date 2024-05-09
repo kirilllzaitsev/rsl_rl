@@ -62,6 +62,7 @@ class DreamerConfig:
     rssm_node_size: int = 128
 
     grad_clip_norm: float = 100.0
+    grad_norm_type: int = 2
     discount_: float = 0.99
     lambda_: float = 0.95
     horizon: int = 10
@@ -142,6 +143,13 @@ class DreamerConfig:
         "use": True,
     }
 
+    use_continue_flag: bool = False  # NN to predict end of episode
+    model_learning_rate: float = 0.0006
+    actor_learning_rate: float = 0.00008
+    critic_learning_rate: float = 0.00008
+
+    collect_interval: int = 1
+
 
 class DayDreamer:
 
@@ -172,12 +180,7 @@ class DayDreamer:
         # following SimpleDreamer
         self.action_size = self.dreamer_config.action_size
         self.discrete_action_bool = False
-        config_path = "/media/master/wext/msc_studies/fourth_semester/robot_learning/project/related_work/SimpleDreamer/dreamer/configs/leggedgym-quadruped-walk.yml"
-        with open(config_path) as f:
-            self.config = AttrDict(yaml.load(f, Loader=yaml.FullLoader))
         self.num_total_episodes = 0
-        for k, v in self.config.parameters.dreamer.items():
-            setattr(self.config, k, v)
 
         self.encoder = DenseModel(
             (self.dreamer_config.embedding_size,),
@@ -194,25 +197,62 @@ class DayDreamer:
             self.modelstate_size,
             self.dreamer_config.obs_decoder,
         ).to(self.device)
-        self.rssm = RSSM(self.action_size, self.config).to(self.device)
+        self.rssm = RSSM(
+            self.action_size,
+            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+            device=self.device,
+            recurrent_model_config={
+                "hidden_size": 200,
+                "activation": "ELU",
+            },
+            transition_model_config={
+                "hidden_size": 200,
+                "num_layers": 2,
+                "activation": "ELU",
+                "min_std": 0.1,
+            },
+            representation_model_config={
+                "embedded_state_size": self.dreamer_config.embedding_size,
+                "hidden_size": 200,
+                "num_layers": 2,
+                "activation": "ELU",
+                "min_std": 0.1,
+            },
+        ).to(self.device)
         self.reward_predictor = RewardModel(
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
             deterministic_size=self.dreamer_config.rssm_info["deter_size"],
             hidden_size=self.dreamer_config.reward["node_size"],
-            num_layers=self.dreamer_config.reward["num_layers"],
+            num_layers=self.dreamer_config.reward["layers"],
             activation=self.dreamer_config.reward["activation"],
         ).to(self.device)
         self.continue_predictor = ContinueModel(
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
             deterministic_size=self.dreamer_config.rssm_info["deter_size"],
             hidden_size=self.dreamer_config.continue_["node_size"],
-            num_layers=self.dreamer_config.continue_["num_layers"],
+            num_layers=self.dreamer_config.continue_["layers"],
             activation=self.dreamer_config.continue_["activation"],
         ).to(self.device)
-        self.actor = Actor(self.discrete_action_bool, self.action_size, self.config).to(
-            self.device
-        )
-        self.critic = Critic(self.config).to(self.device)
+        self.actor = Actor(
+            self.discrete_action_bool,
+            self.action_size,
+            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+            hidden_size=self.dreamer_config.actor["node_size"],
+            num_layers=self.dreamer_config.actor["layers"],
+            activation=self.dreamer_config.actor["activation"],
+            mean_scale=self.dreamer_config.actor["mean_scale"],
+            init_std=self.dreamer_config.actor["init_std"],
+            min_std=self.dreamer_config.actor["min_std"],
+        ).to(self.device)
+        self.critic = Critic(
+            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+            hidden_size=self.dreamer_config.critic["node_size"],
+            num_layers=self.dreamer_config.critic["layers"],
+            activation=self.dreamer_config.critic["activation"],
+        ).to(self.device)
 
         self.dynamic_learning_infos = DynamicInfos(self.device)
         self.behavior_learning_infos = DynamicInfos(self.device)
@@ -226,20 +266,24 @@ class DayDreamer:
             + list(self.rssm.parameters())
             + list(self.reward_predictor.parameters())
         )
-        if self.config.parameters.dreamer.use_continue_flag:
+        if self.dreamer_config.use_continue_flag:
             self.model_params += list(self.continue_predictor.parameters())
 
         self.model_optimizer = torch.optim.Adam(
-            self.model_params, lr=self.config.parameters.dreamer.model_learning_rate
+            self.model_params, lr=self.dreamer_config.model_learning_rate
         )
         self.actor_optimizer = torch.optim.Adam(
             self.actor.parameters(),
-            lr=self.config.parameters.dreamer.actor_learning_rate,
+            lr=self.dreamer_config.actor_learning_rate,
         )
         self.critic_optimizer = torch.optim.Adam(
             self.critic.parameters(),
-            lr=self.config.parameters.dreamer.critic_learning_rate,
+            lr=self.dreamer_config.critic_learning_rate,
         )
+
+        self.stochastic_size = self.dreamer_config.rssm_info["stoch_size"]
+        self.deterministic_size = self.dreamer_config.rssm_info["deter_size"]
+        self.horizon_length = 15
 
     def init_storage(
         self,
@@ -276,7 +320,7 @@ class DayDreamer:
         # self.num_steps_per_env
         behavior_losses = defaultdict(list)
         dynamic_losses = defaultdict(list)
-        for collect_interval in tqdm(range(self.config.collect_interval)):
+        for collect_interval in tqdm(range(self.dreamer_config.collect_interval)):
             data = self.buffer.sample(num_mini_batches=1)
             dynamic_learning_res = self.dynamic_learning(data)
             posteriors = dynamic_learning_res["posteriors"]
@@ -341,7 +385,7 @@ class DayDreamer:
         reconstruction_observation_loss = reconstructed_observation_dist.log_prob(
             data.observation[:, 1:]
         )
-        if self.config.use_continue_flag:
+        if self.dreamer_config.use_continue_flag:
             continue_dist = self.continue_predictor(
                 posterior_info.posteriors, posterior_info.deterministics
             )
@@ -368,22 +412,23 @@ class DayDreamer:
             torch.distributions.kl.kl_divergence(posterior_dist, prior_dist)
         )
         kl_divergence_loss = torch.max(
-            torch.tensor(self.config.free_nats).to(self.device), kl_divergence_loss
+            torch.tensor(self.dreamer_config.kl["free_nats"]).to(self.device),
+            kl_divergence_loss,
         )
         model_loss = (
-            self.config.kl_divergence_scale * kl_divergence_loss
+            self.dreamer_config.loss_scale["kl"] * kl_divergence_loss
             - reconstruction_observation_loss.mean()
             - reward_loss.mean()
         )
-        if self.config.use_continue_flag:
+        if self.dreamer_config.use_continue_flag:
             model_loss += continue_loss.mean()
 
         self.model_optimizer.zero_grad()
         model_loss.backward()
         nn.utils.clip_grad_norm_(
             self.model_params,
-            self.config.clip_grad,
-            norm_type=self.config.grad_norm_type,
+            self.dreamer_config.grad_clip_norm,
+            norm_type=self.dreamer_config.grad_norm_type,
         )
         self.model_optimizer.step()
         losses = {
@@ -399,11 +444,11 @@ class DayDreamer:
         #TODO : last posterior truncation(last can be last step)
         posterior shape : (batch, timestep, stochastic)
         """
-        state = states.reshape(-1, self.config.stochastic_size)
-        deterministic = deterministics.reshape(-1, self.config.deterministic_size)
+        state = states.reshape(-1, self.stochastic_size)
+        deterministic = deterministics.reshape(-1, self.deterministic_size)
 
         # continue_predictor reinit
-        for t in range(self.config.horizon_length):
+        for t in range(self.horizon_length):
             action = self.actor(state, deterministic)
             deterministic = self.rssm.recurrent_model(state, action, deterministic)
             _, state = self.rssm.transition_model(deterministic)
@@ -422,20 +467,20 @@ class DayDreamer:
             behavior_learning_infos.priors, behavior_learning_infos.deterministics
         ).mean
 
-        if self.config.use_continue_flag:
+        if self.dreamer_config.use_continue_flag:
             continues = self.continue_predictor(
                 behavior_learning_infos.priors, behavior_learning_infos.deterministics
             ).mean
         else:
-            continues = self.config.discount * torch.ones_like(values)
+            continues = self.dreamer_config.discount_ * torch.ones_like(values)
 
         lambda_values = compute_lambda_values(
             predicted_rewards,
             values,
             continues,
-            self.config.horizon_length,
+            self.horizon_length,
             self.device,
-            self.config.lambda_,
+            self.dreamer_config.lambda_,
         )
 
         actor_loss = -torch.mean(lambda_values)
@@ -444,8 +489,8 @@ class DayDreamer:
         actor_loss.backward()
         nn.utils.clip_grad_norm_(
             self.actor.parameters(),
-            self.config.clip_grad,
-            norm_type=self.config.grad_norm_type,
+            self.dreamer_config.grad_clip_norm,
+            norm_type=self.dreamer_config.grad_norm_type,
         )
         self.actor_optimizer.step()
 
@@ -459,8 +504,8 @@ class DayDreamer:
         value_loss.backward()
         nn.utils.clip_grad_norm_(
             self.critic.parameters(),
-            self.config.clip_grad,
-            norm_type=self.config.grad_norm_type,
+            self.dreamer_config.grad_clip_norm,
+            norm_type=self.dreamer_config.grad_norm_type,
         )
         self.critic_optimizer.step()
 
