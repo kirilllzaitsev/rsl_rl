@@ -32,6 +32,7 @@ import argparse
 
 import numpy as np
 import torch
+from attrdict import AttrDict
 from rsl_rl.utils import split_and_pad_trajectories
 
 
@@ -211,6 +212,11 @@ class RolloutStorage:
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
+        """
+        num_mini_batches=4, len(self.observations)=24
+        batch_size=512*24=12288
+        => mini_batch_size=12288//4=3072
+        """
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(
@@ -464,46 +470,46 @@ class ReplayBuffer(object):
     def add(self, observation, action, reward, next_observation, done):
         self.observation[self.buffer_index] = observation
         self.action[self.buffer_index] = action
-        self.reward[self.buffer_index] = reward
+        self.reward[self.buffer_index] = reward.unsqueeze(-1)
         self.next_observation[self.buffer_index] = next_observation
-        self.done[self.buffer_index] = done
+        self.done[self.buffer_index] = done.unsqueeze(-1)
 
         self.buffer_index = (self.buffer_index + 1) % self.capacity
         self.full = self.full or self.buffer_index == 0
 
-    def sample(self, batch_size, chunk_size):
-        """
-        (batch_size, chunk_size, input_size)
-        """
-        last_filled_index = self.buffer_index - chunk_size + 1
-        assert self.full or (
-            last_filled_index > batch_size
-        ), "too short dataset or too long chunk_size"
-        sample_index = np.random.randint(
-            0, self.capacity if self.full else last_filled_index, batch_size
-        ).reshape(-1, 1)
-        chunk_length = np.arange(chunk_size).reshape(1, -1)
-
-        sample_index = (sample_index + chunk_length) % self.capacity
-
-        observation = torch.as_tensor(
-            self.observation[sample_index], device=self.device
-        ).float()
-        next_observation = torch.as_tensor(
-            self.next_observation[sample_index], device=self.device
-        ).float()
-
-        action = torch.as_tensor(self.action[sample_index], device=self.device)
-        reward = torch.as_tensor(self.reward[sample_index], device=self.device)
-        done = torch.as_tensor(self.done[sample_index], device=self.device)
-
-        sample = argparse.Namespace(
-            **{
-                "observation": observation,
-                "action": action,
-                "reward": reward,
-                "next_observation": next_observation,
-                "done": done,
-            }
+    # TODO: should be sampled at random from the buffer (which by itself contains more than the specified number of transitions. it should represent the whole history or at least approximate it)
+    def sample(self, num_mini_batches):
+        # just a copy of the PPO mini_batch_generator
+        batch_size = self.num_envs * self.num_transitions_per_env
+        mini_batch_size = batch_size // num_mini_batches
+        indices = torch.randperm(
+            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
         )
-        return sample
+
+        observations = self.observation.flatten(0, 1)
+        next_observations = self.next_observation.flatten(0, 1)
+        actions = self.action.flatten(0, 1)
+        rewards = self.reward.flatten(0, 1)
+        dones = self.done.flatten(0, 1)
+
+        i = 0
+        start = i * mini_batch_size
+        end = (i + 1) * mini_batch_size
+        batch_idx = indices[start:end]
+
+        obs_batch = observations[batch_idx]
+        next_obs_batch = next_observations[batch_idx]
+        actions_batch = actions[batch_idx]
+        rewards_batch = rewards[batch_idx]
+        dones_batch = dones[batch_idx]
+
+        batch = {
+            "observation": obs_batch,
+            "action": actions_batch,
+            "reward": rewards_batch,
+            "next_observation": next_obs_batch,
+            "done": dones_batch,
+        }
+        batch = AttrDict(batch)
+
+        return batch
