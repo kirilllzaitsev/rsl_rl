@@ -422,21 +422,38 @@ class RolloutStorage:
 
 
 class ReplayBuffer(object):
-    def __init__(self, observation_shape, action_size, device, capacity):
+    def __init__(
+        self,
+        num_envs,
+        num_transitions_per_env,
+        observation_shape,
+        action_size,
+        device,
+    ):
         self.device = device
-        self.capacity = int(capacity)
+        self.capacity = num_transitions_per_env
 
-        state_type = np.uint8 if len(observation_shape) < 3 else np.float32
-
-        self.observation = np.empty(
-            (self.capacity, *observation_shape), dtype=state_type
+        self.num_transitions_per_env = num_transitions_per_env
+        self.num_envs = num_envs
+        self.observation_shape = observation_shape
+        self.observation = torch.zeros(
+            (self.num_transitions_per_env, self.num_envs, *observation_shape),
+            device=self.device,
         )
-        self.next_observation = np.empty(
-            (self.capacity, *observation_shape), dtype=state_type
+        self.next_observation = torch.zeros(
+            (self.num_transitions_per_env, self.num_envs, *observation_shape),
+            device=self.device,
         )
-        self.action = np.empty((self.capacity, action_size), dtype=np.float32)
-        self.reward = np.empty((self.capacity, 1), dtype=np.float32)
-        self.done = np.empty((self.capacity, 1), dtype=np.float32)
+        self.action = torch.zeros(
+            (self.num_transitions_per_env, self.num_envs, action_size),
+            device=self.device,
+        )
+        self.reward = torch.zeros(
+            (self.num_transitions_per_env, self.num_envs, 1), device=self.device
+        )
+        self.done = torch.zeros(
+            (self.num_transitions_per_env, self.num_envs, 1), device=self.device
+        )
 
         self.buffer_index = 0
         self.full = False
