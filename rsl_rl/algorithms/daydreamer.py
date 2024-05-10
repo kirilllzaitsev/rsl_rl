@@ -1,5 +1,6 @@
 import argparse
-from collections import defaultdict
+import logging
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -30,6 +31,10 @@ from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
 from tqdm.auto import tqdm
+
+# logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class DreamerConfig:
@@ -425,6 +430,44 @@ class DayDreamer:
 
         self.model_optimizer.zero_grad()
         model_loss.backward()
+
+        # for i in range(len(self.model_params)):
+        #     logger.debug(f"{self.model_params[i].grad.norm()}")
+        logger.debug(f"encoder")
+        for i, p in enumerate(self.encoder.parameters()):
+            # print name and norm
+            logger.debug(f"{i} : {p.grad.norm()}")
+        logger.debug(f"decoder")
+        for i, p in enumerate(self.decoder.parameters()):
+            # print name and norm
+            logger.debug(f"{i} : {p.grad.norm()}")
+        counter = 0
+        for i, p in enumerate(self.rssm.transition_model.parameters()):
+            if i == 0:
+                logger.debug(f"transition_model")
+            logger.debug(f"{i} : {p.grad.norm()}")
+            counter += 1
+        for i, p in enumerate(self.rssm.representation_model.parameters()):
+            if i == 0:
+                logger.debug(f"representation_model")
+            logger.debug(f"{i} : {p.grad.norm()}")
+            counter += 1
+        for i, p in enumerate(self.rssm.representation_model.parameters()):
+            if i == 0:
+                logger.debug(f"representation_model")
+            logger.debug(f"{i} : {p.grad.norm()}")
+            counter += 1
+        # logger.debug(f"{counter=} layers in three rssm models")
+        logger.debug(f"reward")
+        for i, p in enumerate(self.reward_predictor.parameters()):
+            # print name and norm
+            logger.debug(f"{i} : {p.grad.norm()}")
+        if self.dreamer_config.use_continue_flag:
+            logger.debug(f"continue")
+            for i, p in enumerate(self.continue_predictor.parameters()):
+                # print name and norm
+                logger.debug(f"{i} : {p.grad.norm()}")
+
         nn.utils.clip_grad_norm_(
             self.model_params,
             self.dreamer_config.grad_clip_norm,
@@ -487,6 +530,10 @@ class DayDreamer:
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+        logger.debug(f"actor")
+        for i, p in enumerate(self.actor.parameters()):
+            # print name and norm
+            logger.debug(f"{i} : {p.grad.norm()}")
         nn.utils.clip_grad_norm_(
             self.actor.parameters(),
             self.dreamer_config.grad_clip_norm,
@@ -502,6 +549,12 @@ class DayDreamer:
 
         self.critic_optimizer.zero_grad()
         value_loss.backward()
+
+        logger.debug(f"critic")
+        for i, p in enumerate(self.critic.parameters()):
+            # print name and norm
+            logger.debug(f"{i} : {p.grad.norm()}")
+
         nn.utils.clip_grad_norm_(
             self.critic.parameters(),
             self.dreamer_config.grad_clip_norm,
@@ -513,7 +566,16 @@ class DayDreamer:
         return losses
 
     @torch.no_grad()
-    def environment_interaction(self, env, num_interaction_episodes, train=True):
+    def environment_interaction(
+        self, env, num_interaction_episodes, num_envs, train=True
+    ):
+        ep_infos = []
+        rewbuffer = deque(maxlen=100)
+        lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros(num_envs, dtype=torch.float, device=self.device)
+        cur_episode_length = torch.zeros(
+            num_envs, dtype=torch.float, device=self.device
+        )
         for episode in range(num_interaction_episodes):
 
             observation, _ = env.reset()
@@ -544,6 +606,18 @@ class DayDreamer:
             next_observation, privileged_next_observation, reward, done, info = (
                 env.step(env_action)
             )
+
+            # Book keeping
+            if "episode" in info:
+                ep_infos.append(info["episode"])
+            cur_reward_sum += reward
+            cur_episode_length += 1
+            new_ids = (done > 0).nonzero(as_tuple=False)
+            rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
+            lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+            cur_reward_sum[new_ids] = 0
+            cur_episode_length[new_ids] = 0
+
             # no need for this in model-based RL?!
             # Bootstrapping on time outs
             # if "time_outs" in info:
@@ -563,13 +637,18 @@ class DayDreamer:
             if train:
                 score = np.mean(score_lst)
                 self.num_total_episodes += 1
-                print(f"episode {self.num_total_episodes} score: {score}")
+                logger.debug(f"episode {self.num_total_episodes} score: {score}")
 
         if not train:
             evaluate_score = np.mean(score_lst)
-            print("evaluate score : ", evaluate_score)
-            print("test score", evaluate_score, self.num_total_episodes)
+            logger.debug("evaluate score : ", evaluate_score)
+            logger.debug("test score", evaluate_score, self.num_total_episodes)
             return evaluate_score
+        return {
+            "rewbuffer": rewbuffer,
+            "lenbuffer": lenbuffer,
+            "ep_infos": ep_infos,
+        }
 
     def update_dreamer_v1(self, train_metrics) -> dict:
         """
