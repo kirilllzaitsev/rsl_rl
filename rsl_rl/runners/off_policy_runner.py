@@ -278,8 +278,16 @@ class OffPolicyRunner:
     def save(self, path, infos=None):
         torch.save(
             {
-                "model_state_dict": self.alg.actor_critic.state_dict(),
-                "optimizer_state_dict": self.alg.optimizer.state_dict(),
+                "transition_model_state_dict": self.alg.rssm.transition_model.state_dict(),
+                "reward_predictor_state_dict": self.alg.reward_predictor.state_dict(),
+                "recurrent_state_model_state_dict": self.alg.rssm.recurrent_model.state_dict(),
+                "encoder_state_dict": self.alg.encoder.state_dict(),
+                "decoder_state_dict": self.alg.decoder.state_dict(),
+                "actor_state_dict": self.alg.actor.state_dict(),
+                "critic_state_dict": self.alg.critic.state_dict(),
+                "model_optimizer_state_dict": self.alg.model_optimizer.state_dict(),
+                "actor_optimizer_state_dict": self.alg.actor_optimizer.state_dict(),
+                "critic_optimizer_state_dict": self.alg.critic_optimizer.state_dict(),
                 "iter": self.current_learning_iteration,
                 "infos": infos,
             },
@@ -288,43 +296,34 @@ class OffPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        self.alg.rssm.transition_model.load_state_dict(
+            loaded_dict["transition_model_state_dict"]
+        )
+        self.alg.reward_predictor.load_state_dict(
+            loaded_dict["reward_predictor_state_dict"]
+        )
+        self.alg.rssm.recurrent_model.load_state_dict(
+            loaded_dict["recurrent_state_model_state_dict"]
+        )
+        self.alg.encoder.load_state_dict(loaded_dict["encoder_state_dict"])
+        self.alg.decoder.load_state_dict(loaded_dict["decoder_state_dict"])
+        self.alg.actor.load_state_dict(loaded_dict["actor_state_dict"])
+        self.alg.critic.load_state_dict(loaded_dict["critic_state_dict"])
         if load_optimizer:
-            self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            self.alg.model_optimizer.load_state_dict(
+                loaded_dict["model_optimizer_state_dict"]
+            )
+            self.alg.actor_optimizer.load_state_dict(
+                loaded_dict["actor_optimizer_state_dict"]
+            )
+            self.alg.critic_optimizer.load_state_dict(
+                loaded_dict["critic_optimizer_state_dict"]
+            )
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 
-    @torch.no_grad()
-    def do_inference(self, obs, num_actions, device=None):
-        device = device if device is not None else self.device
-        batch_size = obs.shape[0]
-        if not hasattr(self, "did_one_iter"):
-            self.did_one_iter = True
-            # TODO: do init fresh once or at every subsequent inference step?
-            self.prev_action = torch.zeros(batch_size, num_actions).to(device)
-            _, self.prev_deterministic = self.alg.rssm.recurrent_model_input_init(batch_size)
-
-        embedded_observation = self.alg.encoder(obs.to(device))
-        _, posterior = self.alg.rssm.representation_model(
-            embedded_observation, self.prev_deterministic
-        )
-
-        deterministic = self.alg.rssm.recurrent_model(
-            posterior, self.prev_action, self.prev_deterministic
-        )
-        embedded_observation = embedded_observation.reshape(batch_size, -1)
-        _, posterior = self.alg.rssm.representation_model(
-            embedded_observation, deterministic
-        )
-        action = self.alg.actor(posterior, deterministic).detach()
-
-        self.prev_deterministic = deterministic
-        self.prev_action = action
-
-        return action
-
     def get_inference_policy(self, device=None):
-        self.alg.actor.eval()
+        self.alg.actor_critic.eval()  # switch to evaluation mode (dropout for example)
         if device is not None:
-            self.alg.actor.to(device)
-        return self.do_inference
+            self.alg.actor_critic.to(device)
+        return self.alg.actor_critic.act_inference
