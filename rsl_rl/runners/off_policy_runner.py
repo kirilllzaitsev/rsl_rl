@@ -167,19 +167,17 @@ class OffPolicyRunner:
             )
         )
 
-    def log_metrics(self, metrics, step):
-        for key, value in metrics.items():
-            if key == "mean_value_loss":
-                key = "Loss/value_function"
-            elif key == "mean_surrogate_loss":
-                key = "Loss/surrogate"
-            self.writer.add_scalar(key, value, step)
-
     def log(self, locs, width=80, pad=35, train_metrics=None):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
         train_metrics = {} if train_metrics is None else train_metrics
+
+        fps = int(
+            self.num_steps_per_env
+            * self.env.num_envs
+            / (locs["collection_time"] + locs["learn_time"])
+        )
 
         ep_string = f""
         if locs["ep_infos"]:
@@ -195,18 +193,9 @@ class OffPolicyRunner:
                 value = torch.mean(infotensor)
                 self.writer.add_scalar("Episode/" + key, value, locs["it"])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
-        fps = int(
-            self.num_steps_per_env
-            * self.env.num_envs
-            / (locs["collection_time"] + locs["learn_time"])
-        )
-
-        for k, v in train_metrics.items():
-            self.writer.add_scalar("Train/" + k, v, locs["it"])
 
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+        # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar(
             "Perf/collection time", locs["collection_time"], locs["it"]
@@ -234,35 +223,24 @@ class OffPolicyRunner:
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
+        log_string = (
+            f"""{'#' * width}\n"""
+            f"""{str.center(width, ' ')}\n\n"""
+            f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+            # f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+        )
         if len(locs["rewbuffer"]) > 0:
-            log_string = (
-                f"""{'#' * width}\n"""
-                f"""{str.center(width, ' ')}\n\n"""
-                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                # f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                # f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
-            )
-            #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-            #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-        else:
-            log_string = (
-                f"""{'#' * width}\n"""
-                f"""{str.center(width, ' ')}\n\n"""
-                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-            )
-            #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-            #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+            log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+        if len(locs["lenbuffer"]) > 0:
+            log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
 
         for k, v in train_metrics.items():
-            log_string += f"""{f'Mean {k}:':>{pad}} {v:.4f}\n"""
+            log_string += f"""{f'Mean {k}:':>{pad}} {statistics.mean(v):.4f}\n"""
+
+        for k, v in train_metrics.items():
+            prefix = "Train" if "loss" not in k.lower() else "Loss"
+            self.writer.add_scalar(f"{prefix}/{k}", statistics.mean(v), locs["it"])
 
         log_string += ep_string
         log_string += (
@@ -278,16 +256,8 @@ class OffPolicyRunner:
     def save(self, path, infos=None):
         torch.save(
             {
-                "transition_model_state_dict": self.alg.rssm.transition_model.state_dict(),
-                "reward_predictor_state_dict": self.alg.reward_predictor.state_dict(),
-                "recurrent_state_model_state_dict": self.alg.rssm.recurrent_model.state_dict(),
-                "encoder_state_dict": self.alg.encoder.state_dict(),
-                "decoder_state_dict": self.alg.decoder.state_dict(),
-                "actor_state_dict": self.alg.actor.state_dict(),
-                "critic_state_dict": self.alg.critic.state_dict(),
-                "model_optimizer_state_dict": self.alg.model_optimizer.state_dict(),
-                "actor_optimizer_state_dict": self.alg.actor_optimizer.state_dict(),
-                "critic_optimizer_state_dict": self.alg.critic_optimizer.state_dict(),
+                "model_state_dict": self.alg.actor_critic.state_dict(),
+                "optimizer_state_dict": self.alg.optimizer.state_dict(),
                 "iter": self.current_learning_iteration,
                 "infos": infos,
             },
@@ -296,34 +266,43 @@ class OffPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.rssm.transition_model.load_state_dict(
-            loaded_dict["transition_model_state_dict"]
-        )
-        self.alg.reward_predictor.load_state_dict(
-            loaded_dict["reward_predictor_state_dict"]
-        )
-        self.alg.rssm.recurrent_model.load_state_dict(
-            loaded_dict["recurrent_state_model_state_dict"]
-        )
-        self.alg.encoder.load_state_dict(loaded_dict["encoder_state_dict"])
-        self.alg.decoder.load_state_dict(loaded_dict["decoder_state_dict"])
-        self.alg.actor.load_state_dict(loaded_dict["actor_state_dict"])
-        self.alg.critic.load_state_dict(loaded_dict["critic_state_dict"])
+        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
         if load_optimizer:
-            self.alg.model_optimizer.load_state_dict(
-                loaded_dict["model_optimizer_state_dict"]
-            )
-            self.alg.actor_optimizer.load_state_dict(
-                loaded_dict["actor_optimizer_state_dict"]
-            )
-            self.alg.critic_optimizer.load_state_dict(
-                loaded_dict["critic_optimizer_state_dict"]
-            )
+            self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 
+    @torch.no_grad()
+    def do_inference(self, obs, num_actions, device=None):
+        device = device if device is not None else self.device
+        batch_size = obs.shape[0]
+        if not hasattr(self, "did_one_iter"):
+            self.did_one_iter = True
+            # TODO: do init fresh once or at every subsequent inference step?
+            self.prev_action = torch.zeros(batch_size, num_actions).to(device)
+            _, self.prev_deterministic = self.alg.rssm.recurrent_model_input_init(batch_size)
+
+        embedded_observation = self.alg.encoder(obs.to(device))
+        _, posterior = self.alg.rssm.representation_model(
+            embedded_observation, self.prev_deterministic
+        )
+
+        deterministic = self.alg.rssm.recurrent_model(
+            posterior, self.prev_action, self.prev_deterministic
+        )
+        embedded_observation = embedded_observation.reshape(batch_size, -1)
+        _, posterior = self.alg.rssm.representation_model(
+            embedded_observation, deterministic
+        )
+        action = self.alg.actor(posterior, deterministic).detach()
+
+        self.prev_deterministic = deterministic
+        self.prev_action = action
+
+        return action
+
     def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval()  # switch to evaluation mode (dropout for example)
+        self.alg.actor.eval()
         if device is not None:
-            self.alg.actor_critic.to(device)
-        return self.alg.actor_critic.act_inference
+            self.alg.actor.to(device)
+        return self.do_inference
