@@ -294,8 +294,37 @@ class OffPolicyRunner:
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 
+    @torch.no_grad()
+    def do_inference(self, obs, num_actions, device=None):
+        device = device if device is not None else self.device
+        batch_size = obs.shape[0]
+        if not hasattr(self, "did_one_iter"):
+            self.did_one_iter = True
+            # TODO: do init fresh once or at every subsequent inference step?
+            self.prev_action = torch.zeros(batch_size, num_actions).to(device)
+            _, self.prev_deterministic = self.alg.rssm.recurrent_model_input_init(batch_size)
+
+        embedded_observation = self.alg.encoder(obs.to(device))
+        _, posterior = self.alg.rssm.representation_model(
+            embedded_observation, self.prev_deterministic
+        )
+
+        deterministic = self.alg.rssm.recurrent_model(
+            posterior, self.prev_action, self.prev_deterministic
+        )
+        embedded_observation = embedded_observation.reshape(batch_size, -1)
+        _, posterior = self.alg.rssm.representation_model(
+            embedded_observation, deterministic
+        )
+        action = self.alg.actor(posterior, deterministic).detach()
+
+        self.prev_deterministic = deterministic
+        self.prev_action = action
+
+        return action
+
     def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval()  # switch to evaluation mode (dropout for example)
+        self.alg.actor.eval()
         if device is not None:
-            self.alg.actor_critic.to(device)
-        return self.alg.actor_critic.act_inference
+            self.alg.actor.to(device)
+        return self.do_inference
