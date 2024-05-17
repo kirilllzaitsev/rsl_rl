@@ -59,9 +59,7 @@ class OnPolicyRunner:
             self.env.num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
-        self.alg: PPO = alg_class(
-            actor_critic, device=self.device, **self.alg_cfg
-        )
+        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -152,16 +150,17 @@ class OnPolicyRunner:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-            if it % self.save_interval == 0:
+            if (it + 1) % self.save_interval == 0 and self.log_dir is not None:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             ep_infos.clear()
 
         self.current_learning_iteration += num_learning_iterations
-        self.save(
-            os.path.join(
-                self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
+        if self.log_dir is not None:
+            self.save(
+                os.path.join(
+                    self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
+                )
             )
-        )
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
