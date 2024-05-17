@@ -33,6 +33,7 @@ import statistics
 import time
 import typing as t
 from collections import defaultdict, deque
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -123,6 +124,8 @@ class OffPolicyRunner:
         lenbuffer.extend(interaction_info["lenbuffer"])
         ep_infos.extend(interaction_info["ep_infos"])
 
+        if self.log_dir is not None:
+            print(f"{Path(self.log_dir).name=}")
         # main loop
         for it in range(self.current_learning_iteration, tot_iter):
 
@@ -133,30 +136,32 @@ class OffPolicyRunner:
                     train_metrics[loss_name].append(np.mean(loss_values))
             stop = time.time()
             learn_time = stop - start
-            print(f"{learn_time=}")
+            # print(f"{learn_time=}")
 
             # tmp: without new samples, prove that it can overfit to what's in the buffer
-            start = time.time()
-            interaction_info = self.alg.environment_interaction(
-                self.env, self.num_steps_per_env, num_envs=self.env.num_envs
-            )
-            rewbuffer.extend(interaction_info["rewbuffer"])
-            lenbuffer.extend(interaction_info["lenbuffer"])
-            ep_infos.extend(interaction_info["ep_infos"])
-            stop = time.time()
-            collection_time = stop - start
-            print(f"{collection_time=}")
+            if True or it == self.current_learning_iteration:
+                start = time.time()
+                interaction_info = self.alg.environment_interaction(
+                    self.env, self.num_steps_per_env, num_envs=self.env.num_envs
+                )
+                rewbuffer.extend(interaction_info["rewbuffer"])
+                lenbuffer.extend(interaction_info["lenbuffer"])
+                ep_infos.extend(interaction_info["ep_infos"])
+                stop = time.time()
+                collection_time = stop - start
+                # print(f"{collection_time=}")
 
-            if self.log_dir is not None:
-                self.log(locals(), train_metrics=train_metrics)
+            self.log(locals(), train_metrics=train_metrics)
             ep_infos.clear()
 
         self.current_learning_iteration += num_learning_iterations
-        self.save(
-            os.path.join(
-                self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
+        if self.log_dir is not None:
+            print(f"{Path(self.log_dir).name=}")
+            self.save(
+                os.path.join(
+                    self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
+                )
             )
-        )
 
     def log(self, locs, width=80, pad=35, train_metrics=None):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -182,35 +187,39 @@ class OffPolicyRunner:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
-                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                if self.log_dir is not None:
+                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
 
-        self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
-        # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-        self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
-        self.writer.add_scalar(
-            "Perf/collection time", locs["collection_time"], locs["it"]
-        )
-        self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
-        if len(locs["rewbuffer"]) > 0:
+        if self.log_dir is not None:
             self.writer.add_scalar(
-                "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+                "Loss/learning_rate", self.alg.learning_rate, locs["it"]
             )
+            # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+            self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
             self.writer.add_scalar(
-                "Train/mean_episode_length",
-                statistics.mean(locs["lenbuffer"]),
-                locs["it"],
+                "Perf/collection time", locs["collection_time"], locs["it"]
             )
-            self.writer.add_scalar(
-                "Train/mean_reward/time",
-                statistics.mean(locs["rewbuffer"]),
-                self.tot_time,
-            )
-            self.writer.add_scalar(
-                "Train/mean_episode_length/time",
-                statistics.mean(locs["lenbuffer"]),
-                self.tot_time,
-            )
+            self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+            if len(locs["rewbuffer"]) > 0:
+                self.writer.add_scalar(
+                    "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+                )
+                self.writer.add_scalar(
+                    "Train/mean_episode_length",
+                    statistics.mean(locs["lenbuffer"]),
+                    locs["it"],
+                )
+                self.writer.add_scalar(
+                    "Train/mean_reward/time",
+                    statistics.mean(locs["rewbuffer"]),
+                    self.tot_time,
+                )
+                self.writer.add_scalar(
+                    "Train/mean_episode_length/time",
+                    statistics.mean(locs["lenbuffer"]),
+                    self.tot_time,
+                )
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
@@ -231,7 +240,8 @@ class OffPolicyRunner:
 
         for k, v in train_metrics.items():
             prefix = "Train" if "loss" not in k.lower() else "Loss"
-            self.writer.add_scalar(f"{prefix}/{k}", statistics.mean(v), locs["it"])
+            if self.log_dir is not None:
+                self.writer.add_scalar(f"{prefix}/{k}", statistics.mean(v), locs["it"])
 
         log_string += ep_string
         log_string += (
@@ -299,7 +309,9 @@ class OffPolicyRunner:
             self.did_one_iter = True
             # TODO: do init fresh once or at every subsequent inference step?
             self.prev_action = torch.zeros(batch_size, num_actions).to(device)
-            _, self.prev_deterministic = self.alg.rssm.recurrent_model_input_init(batch_size)
+            _, self.prev_deterministic = self.alg.rssm.recurrent_model_input_init(
+                batch_size
+            )
 
         embedded_observation = self.alg.encoder(obs.to(device))
         _, posterior = self.alg.rssm.representation_model(
