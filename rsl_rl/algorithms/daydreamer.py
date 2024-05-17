@@ -9,8 +9,6 @@ import torch.nn as nn
 import torch.optim as optim
 import yaml
 from attrdict import AttrDict
-from dreamer.modules.actor import Actor
-from dreamer.modules.critic import Critic
 from dreamer.modules.decoder import Decoder
 from dreamer.modules.encoder import Encoder
 from dreamer.modules.model import RSSM, ContinueModel, RewardModel
@@ -28,6 +26,8 @@ from dreamerv2.training.trainer import Trainer as DreamerTrainer
 from dreamerv2.utils.algorithm import compute_return
 from dreamerv2.utils.module import FreezeParameters, get_parameters
 from rsl_rl.modules import ActorCritic
+from rsl_rl.algorithms.dreamer.actor import Actor
+from rsl_rl.algorithms.dreamer.critic import Critic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
 from tqdm.auto import tqdm
@@ -57,8 +57,8 @@ class DreamerConfig:
     # }  # ?
     rssm_type: str = "discrete"
     rssm_info: dict = {
-        "deter_size": 128,
-        "stoch_size": 20,
+        "deter_size": 200,
+        "stoch_size": 30,
         "class_size": 20,
         "category_size": 20,
         "min_std": 0.1,
@@ -72,13 +72,15 @@ class DreamerConfig:
     lambda_: float = 0.95
     horizon: int = 10
 
-    lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
-    loss_scale: dict = {"kl": 0.1, "reward": 1.0, "discount": 5.0}
+    # lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
+    loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
     kl: dict = {
-        "use_kl_balance": True,
-        "kl_balance_scale": 0.8,
-        "use_free_nats": False,
-        "free_nats": 0.0,
+        # "use_kl_balance": True,
+        # "kl_balance_scale": 0.8,
+        # "use_free_nats": False,
+        # "free_nats": 0.0,
+        "use_free_nats": True,
+        "free_nats": 3.0,
     }
 
     # ?
@@ -87,12 +89,12 @@ class DreamerConfig:
     # slow_target_fraction: float = 1.00
 
     actor: dict = {
-        "layers": 2,
-        "node_size": 64,
-        "dist": "one_hot",
+        "layers": 2,  # same as node_size but the effect is less pronounced
+        "node_size": 64,  # higher -> positive impact on actor loss, negative impact on value loss
+        "dist": "one_hot",  # not used
         "min_std": 1e-4,
-        "init_std": 5,
-        "mean_scale": 5,
+        "init_std": 5,  # important. has to be high
+        "mean_scale": 0.1,  # not important
         "activation": nn.ELU,
     }
     expl: dict = {
@@ -103,8 +105,8 @@ class DreamerConfig:
         "expl_type": "epsilon_greedy",
     }
     critic: dict = {
-        "layers": 2,
-        "node_size": 64,
+        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well?!
+        "node_size": 128, # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
