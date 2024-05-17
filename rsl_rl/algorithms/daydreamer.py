@@ -569,7 +569,7 @@ class DayDreamer:
 
     @torch.no_grad()
     def environment_interaction(
-        self, env, num_interaction_episodes, num_envs, train=True
+        self, env, num_steps_per_env, num_envs, train=True
     ):
         ep_infos = []
         rewbuffer = deque(maxlen=100)
@@ -584,8 +584,8 @@ class DayDreamer:
         posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
         action = torch.zeros(batch_size, self.action_size).to(self.device)
         score_lst = []
-        
-        for episode in range(num_interaction_episodes):
+
+        for t in range(num_steps_per_env):
 
             deterministic = self.rssm.recurrent_model(posterior, action, deterministic)
             embedded_observation = embedded_observation.reshape(batch_size, -1)
@@ -623,7 +623,6 @@ class DayDreamer:
             lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
             cur_reward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
-
 
             if train:
                 score = np.mean(score_lst)
