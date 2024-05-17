@@ -578,17 +578,14 @@ class DayDreamer:
         cur_episode_length = torch.zeros(
             num_envs, dtype=torch.float, device=self.device
         )
+        observation, _ = env.reset()
+        embedded_observation = self.encoder(observation)
+        batch_size = embedded_observation.shape[0]
+        posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
+        action = torch.zeros(batch_size, self.action_size).to(self.device)
+        score_lst = []
+        
         for episode in range(num_interaction_episodes):
-
-            observation, _ = env.reset()
-            embedded_observation = self.encoder(observation)
-            batch_size = embedded_observation.shape[0]
-
-            posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
-            action = torch.zeros(batch_size, self.action_size).to(self.device)
-
-            score_lst = []
-            done = False
 
             deterministic = self.rssm.recurrent_model(posterior, action, deterministic)
             embedded_observation = embedded_observation.reshape(batch_size, -1)
@@ -608,6 +605,13 @@ class DayDreamer:
             next_observation, privileged_next_observation, reward, done, info = (
                 env.step(env_action)
             )
+            if train:
+                self.buffer.add(
+                    observation, buffer_action, reward, next_observation, done
+                )
+            score_lst.append(reward.mean().item())
+            embedded_observation = self.encoder(next_observation)
+            observation = next_observation
 
             # Book keeping
             if "episode" in info:
@@ -620,21 +624,6 @@ class DayDreamer:
             cur_reward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
 
-            # no need for this in model-based RL?!
-            # Bootstrapping on time outs
-            # if "time_outs" in info:
-            #     reward += self.gamma * torch.squeeze(
-            #         values
-            #         * info["time_outs"].unsqueeze(1).to(self.device),
-            #         1,
-            #     )
-            if train:
-                self.buffer.add(
-                    observation, buffer_action, reward, next_observation, done
-                )
-            score_lst.append(reward.mean().item())
-            embedded_observation = self.encoder(next_observation)
-            observation = next_observation
 
             if train:
                 score = np.mean(score_lst)
