@@ -148,8 +148,7 @@ class OnPolicyRunner:
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
-            if self.log_dir is not None:
-                self.log(locals())
+            self.log(locals())
             if (it + 1) % self.save_interval == 0 and self.log_dir is not None:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             ep_infos.clear()
@@ -179,7 +178,8 @@ class OnPolicyRunner:
                         ep_info[key] = ep_info[key].unsqueeze(0)
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
-                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                if self.writer is not None:
+                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(
@@ -188,38 +188,41 @@ class OnPolicyRunner:
             / (locs["collection_time"] + locs["learn_time"])
         )
 
-        self.writer.add_scalar(
-            "Loss/value_function", locs["mean_value_loss"], locs["it"]
-        )
-        self.writer.add_scalar(
-            "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
-        )
-        self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-        self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
-        self.writer.add_scalar(
-            "Perf/collection time", locs["collection_time"], locs["it"]
-        )
-        self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
-        if len(locs["rewbuffer"]) > 0:
+        if self.writer is not None:
             self.writer.add_scalar(
-                "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+                "Loss/value_function", locs["mean_value_loss"], locs["it"]
             )
             self.writer.add_scalar(
-                "Train/mean_episode_length",
-                statistics.mean(locs["lenbuffer"]),
-                locs["it"],
+                "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
             )
             self.writer.add_scalar(
-                "Train/mean_reward/time",
-                statistics.mean(locs["rewbuffer"]),
-                self.tot_time,
+                "Loss/learning_rate", self.alg.learning_rate, locs["it"]
             )
+            self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
+            self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
             self.writer.add_scalar(
-                "Train/mean_episode_length/time",
-                statistics.mean(locs["lenbuffer"]),
-                self.tot_time,
+                "Perf/collection time", locs["collection_time"], locs["it"]
             )
+            self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+            if len(locs["rewbuffer"]) > 0:
+                self.writer.add_scalar(
+                    "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+                )
+                self.writer.add_scalar(
+                    "Train/mean_episode_length",
+                    statistics.mean(locs["lenbuffer"]),
+                    locs["it"],
+                )
+                self.writer.add_scalar(
+                    "Train/mean_reward/time",
+                    statistics.mean(locs["rewbuffer"]),
+                    self.tot_time,
+                )
+                self.writer.add_scalar(
+                    "Train/mean_episode_length/time",
+                    statistics.mean(locs["lenbuffer"]),
+                    self.tot_time,
+                )
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
@@ -251,6 +254,10 @@ class OnPolicyRunner:
             #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
         log_string += ep_string
+        for k, v in locs['infos']['episode'].items():
+            if k.startswith("rew_"):
+                log_string += f"""{f'Mean {k}:':>{pad}} {torch.mean(v).item():.4f}\n"""
+
         log_string += (
             f"""{'-' * width}\n"""
             f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
