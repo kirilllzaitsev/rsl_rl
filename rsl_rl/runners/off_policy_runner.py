@@ -53,18 +53,8 @@ class OffPolicyRunner:
         self.policy_cfg = train_cfg["policy"] if "policy" in train_cfg else {}
         self.device = device
         self.env = env
-        if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs
-        else:
-            num_critic_obs = self.env.num_obs
-        actor_critic_class = eval(self.cfg["policy_class_name"])  # ActorCritic
-        actor_critic: ActorCritic = actor_critic_class(
-            self.env.num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
-        alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
-        self.alg: DayDreamer = alg_class(
-            actor_critic, device=self.device, **self.alg_cfg
-        )
+        alg_class = eval(self.cfg["algorithm_class_name"])
+        self.alg: DayDreamer = alg_class(device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -123,6 +113,10 @@ class OffPolicyRunner:
         rewbuffer.extend(interaction_info["rewbuffer"])
         lenbuffer.extend(interaction_info["lenbuffer"])
         ep_infos.extend(interaction_info["ep_infos"])
+
+        obs = self.alg.buffer.observation
+        rewards = self.alg.buffer.reward
+        actions = self.alg.buffer.action
 
         if self.log_dir is not None:
             print(f"{Path(self.log_dir).name=}")
