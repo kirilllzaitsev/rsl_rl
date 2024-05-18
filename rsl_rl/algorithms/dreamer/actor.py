@@ -30,9 +30,8 @@ class Actor(nn.Module):
         self.min_std = min_std
 
         action_size = action_size if discrete_action_bool else 1 * action_size
-        init_noise_std = 1.0
         self.std = nn.Parameter(
-            init_noise_std * torch.ones(action_size), requires_grad=True
+            init_std * torch.ones(action_size), requires_grad=True
         )
 
         self.network = build_network(

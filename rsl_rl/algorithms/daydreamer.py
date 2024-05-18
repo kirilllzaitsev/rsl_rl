@@ -46,16 +46,13 @@ class DreamerConfig:
     buffer_capacity: int = int(1e3)  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
-    seq_len: int = 50  # ?
-    batch_size: int = 50  # ?
-
     # rssm_type: str = "continuous"
     # rssm_info: dict = {
     #     "deter_size": 256,
     #     "stoch_size": 32,
     #     "min_std": 0.01,
     # }  # ?
-    rssm_type: str = "discrete"
+    # rssm_type: str = "discrete"
     rssm_info: dict = {
         "deter_size": 200,
         "stoch_size": 30,
@@ -64,13 +61,13 @@ class DreamerConfig:
         "min_std": 0.1,
     }
     embedding_size: int = 128
-    rssm_node_size: int = 128
+    # rssm_node_size: int = 128
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
     discount_: float = 0.99
     lambda_: float = 0.95
-    horizon: int = 10
+    # horizon: int = 10
 
     # lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
     loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
@@ -89,66 +86,66 @@ class DreamerConfig:
     # slow_target_fraction: float = 1.00
 
     actor: dict = {
-        "layers": 2,  # same as node_size but the effect is less pronounced
-        "node_size": 64,  # higher -> positive impact on actor loss, negative impact on value loss
+        "layers": 3,  # same as node_size but the effect is less pronounced
+        "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
         "dist": "one_hot",  # not used
         "min_std": 1e-4,
-        "init_std": 5,  # important. has to be high
+        "init_std": 1.0,  # important. has to be high
         "mean_scale": 0.1,  # not important
         "activation": nn.ELU,
     }
-    expl: dict = {
-        "train_noise": 0.4,
-        "eval_noise": 0.0,
-        "expl_min": 0.05,
-        "expl_decay": 7000.0,
-        "expl_type": "epsilon_greedy",
-    }
+    # expl: dict = {
+    #     "train_noise": 0.4,
+    #     "eval_noise": 0.0,
+    #     "expl_min": 0.05,
+    #     "expl_decay": 7000.0,
+    #     "expl_type": "epsilon_greedy",
+    # }
     critic: dict = {
-        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well?!
+        "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
         "node_size": 128,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
-    actor_grad: str = "reinforce"
-    actor_grad_mix: int = 0.0
-    actor_entropy_scale: float = 1e-3
+    # actor_grad: str = "reinforce"
+    # actor_grad_mix: int = 0.0
+    # actor_entropy_scale: float = 1e-3
 
     obs_encoder: dict = {
-        "layers": 2,
-        "node_size": 64,
+        "layers": 3,
+        "node_size": 128,
         "dist": None,
         "activation": nn.ELU,
-        "kernel": 3,
-        "depth": 16,
+        # "kernel": 3,
+        # "depth": 16,
     }
     obs_decoder: dict = {
-        "layers": 2,
-        "node_size": 64,
+        "layers": 3,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
-        "kernel": 3,
-        "depth": 16,
+        # "kernel": 3,
+        # "depth": 16,
     }
     reward: dict = {
-        "layers": 2,
-        "node_size": 64,
-        "dist": "normal",
-        "activation": nn.ELU,
-    }
-    continue_: dict = {
         "layers": 3,
-        "node_size": 64,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
     }
-    discount: dict = {
-        "layers": 2,
-        "node_size": 64,
-        "dist": "binary",
-        "activation": nn.ELU,
-        "use": True,
-    }
+    # continue_: dict = {
+    #     "layers": 3,
+    #     "node_size": 128,
+    #     "dist": "normal",
+    #     "activation": nn.ELU,
+    # }
+    # discount: dict = {
+    #     "layers": 2,
+    #     "node_size": 128,
+    #     "dist": "binary",
+    #     "activation": nn.ELU,
+    #     "use": True,
+    # }
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
@@ -305,6 +302,7 @@ class DayDreamer:
         # actor_obs_shape vs critic_obs_shape?
         self.num_transitions_per_env = num_transitions_per_env
         self.buffer = ReplayBuffer(
+            capacity=self.dreamer_config.buffer_capacity,
             num_envs=num_envs,
             num_transitions_per_env=num_transitions_per_env,
             observation_size=int(np.prod(self.dreamer_config.obs_shape)),
@@ -325,12 +323,11 @@ class DayDreamer:
         trains the world model and imagination actor and critic for collect_interval times using sequence-batch data from buffer
         dynamic learning + behavior learning
         """
-        # TODO: what is batch length in this case? A:seq_len
-        # self.num_steps_per_env
         behavior_losses = defaultdict(list)
         dynamic_losses = defaultdict(list)
         for collect_interval in tqdm(range(self.dreamer_config.collect_interval)):
-            data = self.buffer.sample(num_mini_batches=1)
+            # TODO: check if this is correct
+            data = self.buffer.sample(num_consecutive_trajs=1, envs_per_batch=-1)
             dynamic_learning_res = self.dynamic_learning(data)
             posteriors = dynamic_learning_res["posteriors"]
             deterministics = dynamic_learning_res["deterministics"]
@@ -351,6 +348,8 @@ class DayDreamer:
         data.embedded_observation = self.encoder(data.observation)
 
         # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
+        # start from 1 because we are already given the first observation
+        # TODO: ensure dimensions are correct
         for t in range(1, self.num_transitions_per_env):
             deterministic = self.rssm.recurrent_model(
                 prior, data.action[:, t - 1], deterministic
@@ -570,18 +569,14 @@ class DayDreamer:
         return losses
 
     @torch.no_grad()
-    def environment_interaction(
-        self, env, num_steps_per_env, num_envs, train=True
-    ):
+    def environment_interaction(self, env, num_steps_per_env, num_envs, train=True):
         ep_infos = []
         rewbuffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(
-            num_envs, dtype=torch.float, device=self.device
-        )
+        cur_reward_sum = torch.zeros(num_envs, dtype=torch.float)
+        cur_episode_length = torch.zeros(num_envs, dtype=torch.float)
         observation, _ = env.reset()
-        embedded_observation = self.encoder(observation)
+        embedded_observation = self.encoder(observation.to(self.device))
         batch_size = embedded_observation.shape[0]
         posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
         action = torch.zeros(batch_size, self.action_size).to(self.device)
@@ -612,13 +607,13 @@ class DayDreamer:
                     observation, buffer_action, reward, next_observation, done
                 )
             score_lst.append(reward.mean().item())
-            embedded_observation = self.encoder(next_observation)
+            embedded_observation = self.encoder(next_observation.to(self.device))
             observation = next_observation
 
             # Book keeping
             if "episode" in info:
                 ep_infos.append(info["episode"])
-            cur_reward_sum += reward
+            cur_reward_sum += reward.cpu()
             cur_episode_length += 1
             new_ids = (done > 0).nonzero(as_tuple=False)
             rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
