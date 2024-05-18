@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-from torch.distributions import TanhTransform
-
 from dreamer.utils.utils import build_network, create_normal_dist
+from torch.distributions import TanhTransform
 
 
 class Actor(nn.Module):
@@ -32,7 +31,9 @@ class Actor(nn.Module):
 
         action_size = action_size if discrete_action_bool else 1 * action_size
         init_noise_std = 1.0
-        # self.std = nn.Parameter(init_noise_std * torch.ones(action_size))
+        self.std = nn.Parameter(
+            init_noise_std * torch.ones(action_size), requires_grad=True
+        )
 
         self.network = build_network(
             self.stochastic_size + self.deterministic_size,
@@ -51,10 +52,11 @@ class Actor(nn.Module):
         else:
             dist = create_normal_dist(
                 x,
-                mean_scale=self.mean_scale,
-                init_std=self.init_std,
-                min_std=self.min_std,
-                activation=torch.tanh,
+                std=self.std,
+                # mean_scale=self.mean_scale,
+                # init_std=self.init_std,
+                # min_std=self.min_std,
+                # activation=torch.tanh,
             )
             # # why is this done?
             # dist = torch.distributions.TransformedDistribution(dist, TanhTransform())
@@ -63,12 +65,3 @@ class Actor(nn.Module):
             # action = dist.sample()  # cannot be. need grads
             action = torch.distributions.Independent(dist, 1).rsample()
         return action
-
-
-    # def update_distribution(self, observations):
-    #     mean = self.actor(observations)
-    #     self.distribution = Normal(mean, mean * 0.0 + self.std)
-
-    # def act(self, observations, **kwargs):
-    #     self.update_distribution(observations)
-    #     return self.distribution.sample()
