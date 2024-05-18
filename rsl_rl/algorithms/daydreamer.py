@@ -43,7 +43,7 @@ class DreamerConfig:
     pixel: bool = False
     action_repeat: int = 1
 
-    capacity: int = int(1e6)
+    buffer_capacity: int = int(1e3)  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
     seq_len: int = 50  # ?

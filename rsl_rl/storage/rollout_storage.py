@@ -430,6 +430,7 @@ class RolloutStorage:
 class ReplayBuffer(object):
     def __init__(
         self,
+        capacity,
         num_envs,
         num_transitions_per_env,
         observation_size,
@@ -437,29 +438,25 @@ class ReplayBuffer(object):
         device,
     ):
         self.device = device
-        self.capacity = num_transitions_per_env
+        self.capacity = capacity
 
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
         self.observation_size = observation_size
         self.observation = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, observation_size),
+            (self.capacity, self.num_envs, observation_size),
             device=self.device,
         )
         self.next_observation = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, observation_size),
+            (self.capacity, self.num_envs, observation_size),
             device=self.device,
         )
         self.action = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, action_size),
+            (self.capacity, self.num_envs, action_size),
             device=self.device,
         )
-        self.reward = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, 1), device=self.device
-        )
-        self.done = torch.zeros(
-            (self.num_transitions_per_env, self.num_envs, 1), device=self.device
-        )
+        self.reward = torch.zeros((self.capacity, self.num_envs, 1), device=self.device)
+        self.done = torch.zeros((self.capacity, self.num_envs, 1), device=self.device)
 
         self.buffer_index = 0
         self.full = False
@@ -478,28 +475,36 @@ class ReplayBuffer(object):
         self.full = self.full or self.buffer_index == 0
 
     # TODO: should be sampled at random from the buffer (which by itself contains more than the specified number of transitions. it should represent the whole history or at least approximate it)
-    def sample(self, num_mini_batches):
+    # TODO: does it make sense to limited envs_per_batch even if many more envs are actually used for training?
+    def sample(self, num_consecutive_trajs, envs_per_batch=64):
         # return batch_size x seq_size x X
         # seq_size is critical for dreamer (the bigger the better)
-        batch_size = self.num_envs
-        mini_batch_size = batch_size // num_mini_batches
-        if True:
-            indices = torch.randperm(
-                num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
-            )
-        else:
-            indices = torch.arange(0, batch_size, device=self.device)
+        assert (
+            num_consecutive_trajs == 1
+        ), "Only num_consecutive_trajs=1 is supported for now"
+        if envs_per_batch == -1:
+            envs_per_batch = self.num_envs
+        env_idx = torch.arange(
+            0, min(self.num_envs, envs_per_batch), device=self.device
+        )
+        sample_index = torch.randint(
+            0,
+            max(1, len(self) - self.num_transitions_per_env),
+            (num_consecutive_trajs,),
+            device=self.device,
+        )
+        chunk_length = (
+            torch.arange(self.num_transitions_per_env).to(self.device)
+        )
+        # chunk_length = torch.clip(chunk_length, max=self.buffer_index)
 
-        i = 0
-        start = i * mini_batch_size
-        end = (i + 1) * mini_batch_size
-        batch_idx = indices[start:end]
+        sample_index = (sample_index + chunk_length) % self.capacity
 
-        obs_batch = self.observation[:, batch_idx].transpose(0, 1)
-        next_obs_batch = self.next_observation[:, batch_idx].transpose(0, 1)
-        actions_batch = self.action[:, batch_idx].transpose(0, 1)
-        rewards_batch = self.reward[:, batch_idx].transpose(0, 1)
-        dones_batch = self.done[:, batch_idx].transpose(0, 1)
+        obs_batch = self.observation[sample_index][:, env_idx].transpose(0, 1)
+        next_obs_batch = self.next_observation[sample_index][:, env_idx].transpose(0, 1)
+        actions_batch = self.action[sample_index][:, env_idx].transpose(0, 1)
+        rewards_batch = self.reward[sample_index][:, env_idx].transpose(0, 1)
+        dones_batch = self.done[sample_index][:, env_idx].transpose(0, 1)
 
         batch = {
             "observation": obs_batch,
