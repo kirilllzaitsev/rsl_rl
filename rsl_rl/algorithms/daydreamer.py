@@ -235,13 +235,14 @@ class DayDreamer:
             num_layers=self.dreamer_config.reward["layers"],
             activation=self.dreamer_config.reward["activation"],
         ).to(self.device)
-        self.continue_predictor = ContinueModel(
-            stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
-            deterministic_size=self.dreamer_config.rssm_info["deter_size"],
-            hidden_size=self.dreamer_config.continue_["node_size"],
-            num_layers=self.dreamer_config.continue_["layers"],
-            activation=self.dreamer_config.continue_["activation"],
-        ).to(self.device)
+        if self.dreamer_config.use_continue_flag:
+            self.continue_predictor = ContinueModel(
+                stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
+                deterministic_size=self.dreamer_config.rssm_info["deter_size"],
+                hidden_size=self.dreamer_config.continue_["node_size"],
+                num_layers=self.dreamer_config.continue_["layers"],
+                activation=self.dreamer_config.continue_["activation"],
+            ).to(self.device)
         self.actor = Actor(
             self.discrete_action_bool,
             self.action_size,
