@@ -25,9 +25,9 @@ from dreamerv2.models.rssm import RSSM as Dreamerv2RSSM
 from dreamerv2.training.trainer import Trainer as DreamerTrainer
 from dreamerv2.utils.algorithm import compute_return
 from dreamerv2.utils.module import FreezeParameters, get_parameters
-from rsl_rl.modules import ActorCritic
 from rsl_rl.algorithms.dreamer.actor import Actor
 from rsl_rl.algorithms.dreamer.critic import Critic
+from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
 from tqdm.auto import tqdm
@@ -106,7 +106,7 @@ class DreamerConfig:
     }
     critic: dict = {
         "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well?!
-        "node_size": 128, # higher -> positive impact on both actor and value loss
+        "node_size": 128,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
@@ -151,8 +151,9 @@ class DreamerConfig:
     }
 
     use_continue_flag: bool = False  # NN to predict end of episode
+    # learning rates are crucial for convergence and overall performance
     model_learning_rate: float = 0.0006
-    actor_learning_rate: float = 0.00008
+    actor_learning_rate: float = 0.0001
     critic_learning_rate: float = 0.00008
 
     collect_interval: int = 1
