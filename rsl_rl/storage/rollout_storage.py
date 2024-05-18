@@ -483,15 +483,12 @@ class ReplayBuffer(object):
         # seq_size is critical for dreamer (the bigger the better)
         batch_size = self.num_envs
         mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(
-            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
-        )
-
-        observations = self.observation.flatten(0, 1)
-        next_observations = self.next_observation.flatten(0, 1)
-        actions = self.action.flatten(0, 1)
-        rewards = self.reward.flatten(0, 1)
-        dones = self.done.flatten(0, 1)
+        if True:
+            indices = torch.randperm(
+                num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
+            )
+        else:
+            indices = torch.arange(0, batch_size, device=self.device)
 
         i = 0
         start = i * mini_batch_size
