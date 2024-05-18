@@ -29,10 +29,8 @@ class Actor(nn.Module):
         self.init_std = init_std
         self.min_std = min_std
 
-        action_size = action_size if discrete_action_bool else 1 * action_size
-        self.std = nn.Parameter(
-            init_std * torch.ones(action_size), requires_grad=True
-        )
+        action_size = action_size if discrete_action_bool else 2 * action_size
+        self.std = None
 
         self.network = build_network(
             self.stochastic_size + self.deterministic_size,
@@ -49,18 +47,16 @@ class Actor(nn.Module):
             dist = torch.distributions.OneHotCategorical(logits=x)
             action = dist.sample() + dist.probs - dist.probs.detach()
         else:
-            dist = create_normal_dist(
+            dist, std = create_normal_dist(
                 x,
-                std=self.std,
-                # mean_scale=self.mean_scale,
-                # init_std=self.init_std,
-                # min_std=self.min_std,
-                # activation=torch.tanh,
+                mean_scale=self.mean_scale,
+                init_std=self.init_std,
+                min_std=self.min_std,
+                activation=torch.tanh,
+                return_std=True,
             )
+            self.std = std
             # # why is this done?
-            # dist = torch.distributions.TransformedDistribution(dist, TanhTransform())
-            # action = torch.distributions.Independent(dist, 1).rsample()
-            # dist = torch.distributions.Normal(x, x * 0.0 + 1.0)
-            # action = dist.sample()  # cannot be. need grads
+            dist = torch.distributions.TransformedDistribution(dist, TanhTransform())
             action = torch.distributions.Independent(dist, 1).rsample()
         return action

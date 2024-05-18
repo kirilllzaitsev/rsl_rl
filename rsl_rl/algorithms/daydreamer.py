@@ -90,7 +90,7 @@ class DreamerConfig:
         "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
         "dist": "one_hot",  # not used
         "min_std": 1e-4,
-        "init_std": 1.0,  # important. has to be high
+        "init_std": 5.0,  # important. has to be high
         "mean_scale": 0.1,  # not important
         "activation": nn.ELU,
     }
