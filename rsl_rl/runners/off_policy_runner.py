@@ -163,6 +163,7 @@ class OffPolicyRunner:
         iteration_time = locs["collection_time"] + locs["learn_time"]
         train_metrics = {} if train_metrics is None else train_metrics
 
+        mean_std = self.alg.actor.std.mean()
         fps = int(
             self.num_steps_per_env
             * self.env.num_envs
@@ -189,6 +190,7 @@ class OffPolicyRunner:
             self.writer.add_scalar(
                 "Loss/learning_rate", self.alg.learning_rate, locs["it"]
             )
+            self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
             # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
             self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
             self.writer.add_scalar(
@@ -222,7 +224,7 @@ class OffPolicyRunner:
             f"""{str.center(width, ' ')}\n\n"""
             f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-            # f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+            f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
         )
         if len(locs["rewbuffer"]) > 0:
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
