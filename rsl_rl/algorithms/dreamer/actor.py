@@ -56,7 +56,8 @@ class Actor(nn.Module):
                 return_std=True,
             )
             self.std = std
-            # # why is this done?
+            # # why is this transform done?
             dist = torch.distributions.TransformedDistribution(dist, TanhTransform())
             action = torch.distributions.Independent(dist, 1).rsample()
+            # action = torch.distributions.Independent(dist, 1).rsample()
         return action
