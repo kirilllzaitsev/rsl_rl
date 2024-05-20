@@ -85,10 +85,6 @@ class OffPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
         # get first portion of proprioceptive data
-        obs = self.env.get_observations()
-        privileged_obs = self.env.get_privileged_observations()
-        critic_obs = privileged_obs if privileged_obs is not None else obs
-        obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         self.alg.actor.train()
         self.alg.critic.train()
         self.alg.rssm.train()
@@ -114,6 +110,7 @@ class OffPolicyRunner:
         lenbuffer.extend(interaction_info["lenbuffer"])
         ep_infos.extend(interaction_info["ep_infos"])
 
+        # for debugging
         obs = self.alg.buffer.observation
         rewards = self.alg.buffer.reward
         actions = self.alg.buffer.action
@@ -147,6 +144,13 @@ class OffPolicyRunner:
 
             self.log(locals(), train_metrics=train_metrics)
             ep_infos.clear()
+            if (it + 1) % self.save_interval == 0 and self.log_dir is not None:
+                save_path = os.path.join(
+                    self.log_dir,
+                    "model_{}.pt".format(it),
+                )
+                self.save(save_path)
+                print(f"{save_path=}")
 
         self.current_learning_iteration += num_learning_iterations
         if self.log_dir is not None:

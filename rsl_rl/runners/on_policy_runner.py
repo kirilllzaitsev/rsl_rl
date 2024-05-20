@@ -155,6 +155,7 @@ class OnPolicyRunner:
 
         self.current_learning_iteration += num_learning_iterations
         if self.log_dir is not None:
+            print(f"{self.log_dir=}")
             self.save(
                 os.path.join(
                     self.log_dir, "model_{}.pt".format(self.current_learning_iteration)
