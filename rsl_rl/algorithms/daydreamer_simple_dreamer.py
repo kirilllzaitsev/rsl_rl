@@ -1,34 +1,19 @@
-import argparse
 import logging
 from collections import defaultdict, deque
-from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import yaml
-from attrdict import AttrDict
-from dreamer.modules.decoder import Decoder
-from dreamer.modules.encoder import Encoder
 from dreamer.modules.model import RSSM, ContinueModel, RewardModel
 from dreamer.utils.utils import (
     DynamicInfos,
     compute_lambda_values,
     create_normal_dist,
-    load_config,
 )
-from dreamerv2.models.actor import DiscreteActionModel
 from dreamerv2.models.dense import DenseModel
-from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
-from dreamerv2.models.rssm import RSSM as Dreamerv2RSSM
-from dreamerv2.training.trainer import Trainer as DreamerTrainer
-from dreamerv2.utils.algorithm import compute_return
-from dreamerv2.utils.module import FreezeParameters, get_parameters
+from dreamerv2.utils.module import get_parameters
 from rsl_rl.algorithms.dreamer.actor import Actor
 from rsl_rl.algorithms.dreamer.critic import Critic
-from rsl_rl.modules import ActorCritic
-from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
 from tqdm.auto import tqdm
 
@@ -48,115 +33,70 @@ class DreamerConfig:
     )  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
-    # rssm_type: str = "continuous"
-    # rssm_info: dict = {
-    #     "deter_size": 256,
-    #     "stoch_size": 32,
-    #     "min_std": 0.01,
-    # }  # ?
-    # rssm_type: str = "discrete"
     rssm_info: dict = {
         "deter_size": 200,
-        "stoch_size": 50,
+        "stoch_size": 30,
         "class_size": 20,
         "category_size": 20,
         "min_std": 0.1,
     }
-    embedding_size: int = 200
-    # rssm_node_size: int = 128
+    embedding_size: int = 128
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
     discount_: float = 0.99
     lambda_: float = 0.95
-    # horizon: int = 10
+    horizon_length: int = 15
 
-    # lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
     loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
     kl: dict = {
-        # "use_kl_balance": True,
-        # "kl_balance_scale": 0.8,
         # "use_free_nats": False,
         # "free_nats": 0.0,
         "use_free_nats": True,
         "free_nats": 3.0,
     }
 
-    # ?
-    # use_slow_target: float = True
-    # slow_target_update: int = 100
-    # slow_target_fraction: float = 1.00
-
     actor: dict = {
-        "layers": 2,  # same as node_size but the effect is less pronounced
-        "node_size": 256,  # higher -> positive impact on actor loss, negative impact on value loss
+        "layers": 3,  # same as node_size but the effect is less pronounced
+        "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
         "dist": "one_hot",  # not used
         "min_std": 1e-4,
-        "init_std": 3.0,  # important. has to be high with tanh transform
+        "init_std": 1.0,  # important. has to be high with tanh transform
         "mean_scale": 1.0,  # not important
         "activation": nn.ELU,
     }
-    # expl: dict = {
-    #     "train_noise": 0.4,
-    #     "eval_noise": 0.0,
-    #     "expl_min": 0.05,
-    #     "expl_decay": 7000.0,
-    #     "expl_type": "epsilon_greedy",
-    # }
     critic: dict = {
-        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
-        "node_size": 256,  # higher -> positive impact on both actor and value loss
+        "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
+        "node_size": 128,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
-    # actor_grad: str = "reinforce"
-    # actor_grad_mix: int = 0.0
-    # actor_entropy_scale: float = 1e-3
-
     obs_encoder: dict = {
-        "layers": 2,
-        "node_size": 256,
+        "layers": 3,
+        "node_size": 128,
         "dist": None,
         "activation": nn.ELU,
-        # "kernel": 2,
-        # "depth": 16,
     }
     obs_decoder: dict = {
-        "layers": 2,
-        "node_size": 256,
+        "layers": 3,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
-        # "kernel": 2,
-        # "depth": 16,
     }
     reward: dict = {
-        "layers": 2,
-        "node_size": 400,
+        "layers": 3,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
     }
-    # continue_: dict = {
-    #     "layers": 2,
-    #     "node_size": 128,
-    #     "dist": "normal",
-    #     "activation": nn.ELU,
-    # }
-    # discount: dict = {
-    #     "layers": 2,
-    #     "node_size": 128,
-    #     "dist": "binary",
-    #     "activation": nn.ELU,
-    #     "use": True,
-    # }
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
-    model_learning_rate: float = 0.0008
-    actor_learning_rate: float = 0.0001
-    critic_learning_rate: float = 0.0003
+    model_learning_rate: float = 0.0006
+    actor_learning_rate: float = 0.00008
+    critic_learning_rate: float = 0.00008
 
-    collect_interval: int = 30
-    horizon_length: int = 10
+    collect_interval: int = 10
 
 
 class DayDreamer:
@@ -190,7 +130,6 @@ class DayDreamer:
         self.discrete_action_bool = False
         self.num_total_episodes = 0
 
-        # creates latent of an observation
         self.encoder = DenseModel(
             (self.dreamer_config.embedding_size,),
             int(np.prod(self.dreamer_config.obs_shape)),
@@ -201,13 +140,11 @@ class DayDreamer:
             self.dreamer_config.rssm_info["stoch_size"]
             + self.dreamer_config.rssm_info["deter_size"]
         )
-        # reconstructs observation from latent
         self.decoder = DenseModel(
             self.dreamer_config.obs_shape,
             self.modelstate_size,
             self.dreamer_config.obs_decoder,
         ).to(self.device)
-
         self.rssm = RSSM(
             self.action_size,
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
@@ -368,9 +305,7 @@ class DayDreamer:
                 )
                 # same for observation
                 obs = data.observation[:, t]
-                logger.debug(
-                    f"obs: {obs.mean()}, {obs.std()} {obs.min()}, {obs.max()}"
-                )
+                logger.debug(f"obs: {obs.mean()}, {obs.std()} {obs.min()}, {obs.max()}")
             deterministic = self.rssm.recurrent_model(
                 prior, data.action[:, t - 1], deterministic
             )
@@ -454,42 +389,13 @@ class DayDreamer:
         self.model_optimizer.zero_grad()
         model_loss.backward()
 
-        # for i in range(len(self.model_params)):
-        #     logger.debug(f"{self.model_params[i].grad.norm()}")
-        logger.debug(f"encoder")
-        for i, p in enumerate(self.encoder.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
-        logger.debug(f"decoder")
-        for i, p in enumerate(self.decoder.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
-        counter = 0
-        for i, p in enumerate(self.rssm.transition_model.parameters()):
-            if i == 0:
-                logger.debug(f"transition_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        for i, p in enumerate(self.rssm.representation_model.parameters()):
-            if i == 0:
-                logger.debug(f"representation_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        for i, p in enumerate(self.rssm.representation_model.parameters()):
-            if i == 0:
-                logger.debug(f"representation_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        # logger.debug(f"{counter=} layers in three rssm models")
-        logger.debug(f"reward")
-        for i, p in enumerate(self.reward_predictor.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
+        self.log_module_grads(self.encoder, "encoder")
+        self.log_module_grads(self.decoder, "decoder")
+        self.log_module_grads(self.rssm.transition_model, "transition_model")
+        self.log_module_grads(self.rssm.representation_model, "representation_model")
+        self.log_module_grads(self.reward_predictor, "reward_predictor")
         if self.dreamer_config.use_continue_flag:
-            logger.debug(f"continue")
-            for i, p in enumerate(self.continue_predictor.parameters()):
-                # print name and norm
-                logger.debug(f"{i} : {p.grad.norm()}")
+            self.log_module_grads(self.continue_predictor, "continue_predictor")
 
         nn.utils.clip_grad_norm_(
             self.model_params,
@@ -643,15 +549,20 @@ class DayDreamer:
             cur_reward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
 
-            score = np.mean(score_lst)
-            self.num_total_episodes += 1
-            logger.debug(f"episode {self.num_total_episodes} score: {score}")
+            if train:
+                score = np.mean(score_lst)
+                self.num_total_episodes += 1
+                logger.debug(f"episode {self.num_total_episodes} score: {score}")
 
+        if not train:
+            evaluate_score = np.mean(score_lst)
+            logger.debug("evaluate score : ", evaluate_score)
+            logger.debug("test score", evaluate_score, self.num_total_episodes)
+            return evaluate_score
         return {
             "rewbuffer": rewbuffer,
             "lenbuffer": lenbuffer,
             "ep_infos": ep_infos,
-            "score": score,
         }
 
     def update_dreamer_v1(self, train_metrics) -> dict:
@@ -775,3 +686,10 @@ class DayDreamer:
         self.storage.clear()
 
         return train_metrics
+
+    def log_module_grads(self, module, name):
+        logger.debug(name)
+        for i, p in enumerate(module.parameters()):
+            if p.grad is None:
+                continue
+            logger.debug(f"{i} : {p.grad.norm()}")
