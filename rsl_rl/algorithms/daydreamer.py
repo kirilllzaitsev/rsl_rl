@@ -1,34 +1,15 @@
-import argparse
 import logging
 from collections import defaultdict, deque
-from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import yaml
-from attrdict import AttrDict
-from dreamer.modules.decoder import Decoder
-from dreamer.modules.encoder import Encoder
 from dreamer.modules.model import RSSM, ContinueModel, RewardModel
-from dreamer.utils.utils import (
-    DynamicInfos,
-    compute_lambda_values,
-    create_normal_dist,
-    load_config,
-)
-from dreamerv2.models.actor import DiscreteActionModel
+from dreamer.utils.utils import DynamicInfos, compute_lambda_values, create_normal_dist
 from dreamerv2.models.dense import DenseModel
-from dreamerv2.models.pixel import ObsDecoder, ObsEncoder
-from dreamerv2.models.rssm import RSSM as Dreamerv2RSSM
-from dreamerv2.training.trainer import Trainer as DreamerTrainer
-from dreamerv2.utils.algorithm import compute_return
-from dreamerv2.utils.module import FreezeParameters, get_parameters
+from dreamerv2.utils.module import get_parameters
 from rsl_rl.algorithms.dreamer.actor import Actor
 from rsl_rl.algorithms.dreamer.critic import Critic
-from rsl_rl.modules import ActorCritic
-from rsl_rl.storage import RolloutStorage
 from rsl_rl.storage.rollout_storage import ReplayBuffer
 from tqdm.auto import tqdm
 
@@ -48,13 +29,6 @@ class DreamerConfig:
     )  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
-    # rssm_type: str = "continuous"
-    # rssm_info: dict = {
-    #     "deter_size": 256,
-    #     "stoch_size": 32,
-    #     "min_std": 0.01,
-    # }  # ?
-    # rssm_type: str = "discrete"
     rssm_info: dict = {
         "deter_size": 200,
         "stoch_size": 30,
@@ -63,7 +37,6 @@ class DreamerConfig:
         "min_std": 0.1,
     }
     embedding_size: int = 128
-    # rssm_node_size: int = 128
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
@@ -71,22 +44,13 @@ class DreamerConfig:
     lambda_: float = 0.95
     horizon_length: int = 15
 
-    # lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
     loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
     kl: dict = {
-        # "use_kl_balance": True,
-        # "kl_balance_scale": 0.8,
         # "use_free_nats": False,
         # "free_nats": 0.0,
         "use_free_nats": True,
         "free_nats": 3.0,
     }
-
-    # ?
-    # use_slow_target: float = True
-    # slow_target_update: int = 100
-    # slow_target_fraction: float = 1.00
-
     actor: dict = {
         "layers": 3,  # same as node_size but the effect is less pronounced
         "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
@@ -96,38 +60,24 @@ class DreamerConfig:
         "mean_scale": 1.0,  # not important
         "activation": nn.ELU,
     }
-    # expl: dict = {
-    #     "train_noise": 0.4,
-    #     "eval_noise": 0.0,
-    #     "expl_min": 0.05,
-    #     "expl_decay": 7000.0,
-    #     "expl_type": "epsilon_greedy",
-    # }
     critic: dict = {
         "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
         "node_size": 128,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
-    # actor_grad: str = "reinforce"
-    # actor_grad_mix: int = 0.0
-    # actor_entropy_scale: float = 1e-3
 
     obs_encoder: dict = {
         "layers": 3,
         "node_size": 128,
         "dist": None,
         "activation": nn.ELU,
-        # "kernel": 3,
-        # "depth": 16,
     }
     obs_decoder: dict = {
         "layers": 3,
         "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
-        # "kernel": 3,
-        # "depth": 16,
     }
     reward: dict = {
         "layers": 3,
@@ -135,19 +85,6 @@ class DreamerConfig:
         "dist": "normal",
         "activation": nn.ELU,
     }
-    # continue_: dict = {
-    #     "layers": 3,
-    #     "node_size": 128,
-    #     "dist": "normal",
-    #     "activation": nn.ELU,
-    # }
-    # discount: dict = {
-    #     "layers": 2,
-    #     "node_size": 128,
-    #     "dist": "binary",
-    #     "activation": nn.ELU,
-    #     "use": True,
-    # }
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
@@ -172,16 +109,12 @@ class DayDreamer:
 
         self.learning_rate = learning_rate
 
-        # PPO components
-        self.storage = None  # initialized later
-
-        # PPO parameters
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-
-        self.dreamer_config = DreamerConfig()
+        # initialized later
+        self.storage = None
         self.batch_size = None
         self.seq_len = None
+
+        self.dreamer_config = DreamerConfig()
         self.kl_info = self.dreamer_config.kl
 
         # following SimpleDreamer
@@ -194,7 +127,6 @@ class DayDreamer:
             int(np.prod(self.dreamer_config.obs_shape)),
             self.dreamer_config.obs_encoder,
         ).to(self.device)
-        # modelstate_size = stoch_size + deter_size
         self.modelstate_size = (
             self.dreamer_config.rssm_info["stoch_size"]
             + self.dreamer_config.rssm_info["deter_size"]
@@ -354,7 +286,6 @@ class DayDreamer:
 
         # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
         # start from 1 because we are already given the first observation
-        # TODO: ensure dimensions are correct
         for t in range(1, self.num_transitions_per_env):
             if t == 1:
                 # get distribution of actions
@@ -624,128 +555,6 @@ class DayDreamer:
             "lenbuffer": lenbuffer,
             "ep_infos": ep_infos,
         }
-
-    def update_dreamer_v1(self, train_metrics) -> dict:
-        """
-        trains the world model and imagination actor and critic for collect_interval times using sequence-batch data from buffer
-        dynamic learning + behavior learning
-        """
-        actor_l = []
-        value_l = []
-        obs_l = []
-        model_l = []
-        reward_l = []
-        prior_ent_l = []
-        post_ent_l = []
-        kl_l = []
-        pcont_l = []
-        mean_targ = []
-        min_targ = []
-        max_targ = []
-        std_targ = []
-
-        if self.actor_critic.is_recurrent:
-            generator = self.storage.reccurent_mini_batch_generator_dreamer(
-                self.num_mini_batches, self.num_learning_epochs
-            )
-        else:
-            generator = self.storage.mini_batch_generator_dreamer(
-                self.num_mini_batches, self.num_learning_epochs
-            )
-        for (
-            obs_batch,
-            critic_obs_batch,
-            actions_batch,
-            target_values_batch,
-            advantages_batch,
-            returns_batch,
-            old_actions_log_prob_batch,
-            old_mu_batch,
-            old_sigma_batch,
-            hid_states_batch,
-            masks_batch,
-        ) in generator:
-            obs = obs_batch
-            rewards = returns_batch
-            actions = actions_batch
-            terms = torch.zeros((obs.shape[0], obs.shape[1], 1)).to(self.device)
-            # obs, actions, rewards, terms = self.buffer.sample()
-            obs = obs.to(self.device)  # t, t+seq_len
-            actions = actions.to(self.device)  # t-1, t+seq_len-1
-            rewards = rewards.to(self.device)  # t-1 to t+seq_len-1
-            nonterms = 1 - terms
-
-            (
-                model_loss,
-                kl_loss,
-                obs_loss,
-                reward_loss,
-                pcont_loss,
-                prior_dist,
-                post_dist,
-                posterior,
-            ) = self.representation_loss(obs, actions, rewards, nonterms)
-
-            self.model_optimizer.zero_grad()
-            model_loss.backward()
-            grad_norm_model = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.world_list), self.dreamer_config.grad_clip_norm
-            )
-            self.model_optimizer.step()
-
-            actor_loss, value_loss, target_info = self.actorcritc_loss(posterior)
-
-            self.actor_optimizer.zero_grad()
-            self.value_optimizer.zero_grad()
-
-            actor_loss.backward()
-            value_loss.backward()
-
-            grad_norm_actor = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.actor_list), self.dreamer_config.grad_clip_norm
-            )
-            grad_norm_value = torch.nn.utils.clip_grad_norm_(
-                get_parameters(self.value_list), self.dreamer_config.grad_clip_norm
-            )
-
-            self.actor_optimizer.step()
-            self.value_optimizer.step()
-
-            with torch.no_grad():
-                prior_ent = torch.mean(prior_dist.entropy())
-                post_ent = torch.mean(post_dist.entropy())
-
-            prior_ent_l.append(prior_ent.item())
-            post_ent_l.append(post_ent.item())
-            actor_l.append(actor_loss.item())
-            value_l.append(value_loss.item())
-            obs_l.append(obs_loss.item())
-            model_l.append(model_loss.item())
-            reward_l.append(reward_loss.item())
-            kl_l.append(kl_loss.item())
-            pcont_l.append(pcont_loss.item())
-            mean_targ.append(target_info["mean_targ"])
-            min_targ.append(target_info["min_targ"])
-            max_targ.append(target_info["max_targ"])
-            std_targ.append(target_info["std_targ"])
-
-        train_metrics["model_loss"] = np.mean(model_l)
-        train_metrics["kl_loss"] = np.mean(kl_l)
-        train_metrics["reward_loss"] = np.mean(reward_l)
-        train_metrics["obs_loss"] = np.mean(obs_l)
-        train_metrics["value_loss"] = np.mean(value_l)
-        train_metrics["actor_loss"] = np.mean(actor_l)
-        train_metrics["prior_entropy"] = np.mean(prior_ent_l)
-        train_metrics["posterior_entropy"] = np.mean(post_ent_l)
-        train_metrics["pcont_loss"] = np.mean(pcont_l)
-        train_metrics["mean_targ"] = np.mean(mean_targ)
-        train_metrics["min_targ"] = np.mean(min_targ)
-        train_metrics["max_targ"] = np.mean(max_targ)
-        train_metrics["std_targ"] = np.mean(std_targ)
-
-        self.storage.clear()
-
-        return train_metrics
 
     def log_module_grads(self, module, name):
         logger.debug(name)
