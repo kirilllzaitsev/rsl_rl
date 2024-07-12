@@ -44,7 +44,7 @@ class DreamerConfig:
     action_repeat: int = 1
 
     buffer_capacity: int = int(
-        1e5
+        1e4
     )  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
@@ -57,19 +57,19 @@ class DreamerConfig:
     # rssm_type: str = "discrete"
     rssm_info: dict = {
         "deter_size": 200,
-        "stoch_size": 50,
+        "stoch_size": 30,
         "class_size": 20,
         "category_size": 20,
         "min_std": 0.1,
     }
-    embedding_size: int = 200
+    embedding_size: int = 128
     # rssm_node_size: int = 128
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
     discount_: float = 0.99
     lambda_: float = 0.95
-    # horizon: int = 10
+    horizon_length: int = 15
 
     # lr: dict = {"model": 2e-4, "actor": 4e-5, "critic": 1e-4}
     loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
@@ -88,11 +88,11 @@ class DreamerConfig:
     # slow_target_fraction: float = 1.00
 
     actor: dict = {
-        "layers": 2,  # same as node_size but the effect is less pronounced
-        "node_size": 256,  # higher -> positive impact on actor loss, negative impact on value loss
+        "layers": 3,  # same as node_size but the effect is less pronounced
+        "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
         "dist": "one_hot",  # not used
         "min_std": 1e-4,
-        "init_std": 3.0,  # important. has to be high with tanh transform
+        "init_std": 1.0,  # important. has to be high with tanh transform
         "mean_scale": 1.0,  # not important
         "activation": nn.ELU,
     }
@@ -104,8 +104,8 @@ class DreamerConfig:
     #     "expl_type": "epsilon_greedy",
     # }
     critic: dict = {
-        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
-        "node_size": 256,  # higher -> positive impact on both actor and value loss
+        "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
+        "node_size": 128,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
@@ -114,29 +114,29 @@ class DreamerConfig:
     # actor_entropy_scale: float = 1e-3
 
     obs_encoder: dict = {
-        "layers": 2,
-        "node_size": 256,
+        "layers": 3,
+        "node_size": 128,
         "dist": None,
         "activation": nn.ELU,
-        # "kernel": 2,
+        # "kernel": 3,
         # "depth": 16,
     }
     obs_decoder: dict = {
-        "layers": 2,
-        "node_size": 256,
+        "layers": 3,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
-        # "kernel": 2,
+        # "kernel": 3,
         # "depth": 16,
     }
     reward: dict = {
-        "layers": 2,
-        "node_size": 400,
+        "layers": 3,
+        "node_size": 128,
         "dist": "normal",
         "activation": nn.ELU,
     }
     # continue_: dict = {
-    #     "layers": 2,
+    #     "layers": 3,
     #     "node_size": 128,
     #     "dist": "normal",
     #     "activation": nn.ELU,
@@ -151,12 +151,11 @@ class DreamerConfig:
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
-    model_learning_rate: float = 0.0008
-    actor_learning_rate: float = 0.0001
-    critic_learning_rate: float = 0.0003
+    model_learning_rate: float = 0.0006
+    actor_learning_rate: float = 0.00008
+    critic_learning_rate: float = 0.00008
 
-    collect_interval: int = 30
-    horizon_length: int = 10
+    collect_interval: int = 10
 
 
 class DayDreamer:
@@ -190,7 +189,6 @@ class DayDreamer:
         self.discrete_action_bool = False
         self.num_total_episodes = 0
 
-        # creates latent of an observation
         self.encoder = DenseModel(
             (self.dreamer_config.embedding_size,),
             int(np.prod(self.dreamer_config.obs_shape)),
@@ -201,13 +199,11 @@ class DayDreamer:
             self.dreamer_config.rssm_info["stoch_size"]
             + self.dreamer_config.rssm_info["deter_size"]
         )
-        # reconstructs observation from latent
         self.decoder = DenseModel(
             self.dreamer_config.obs_shape,
             self.modelstate_size,
             self.dreamer_config.obs_decoder,
         ).to(self.device)
-
         self.rssm = RSSM(
             self.action_size,
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
@@ -358,6 +354,7 @@ class DayDreamer:
 
         # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
         # start from 1 because we are already given the first observation
+        # TODO: ensure dimensions are correct
         for t in range(1, self.num_transitions_per_env):
             if t == 1:
                 # get distribution of actions
@@ -643,15 +640,20 @@ class DayDreamer:
             cur_reward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
 
-            score = np.mean(score_lst)
-            self.num_total_episodes += 1
-            logger.debug(f"episode {self.num_total_episodes} score: {score}")
+            if train:
+                score = np.mean(score_lst)
+                self.num_total_episodes += 1
+                logger.debug(f"episode {self.num_total_episodes} score: {score}")
 
+        if not train:
+            evaluate_score = np.mean(score_lst)
+            logger.debug("evaluate score : ", evaluate_score)
+            logger.debug("test score", evaluate_score, self.num_total_episodes)
+            return evaluate_score
         return {
             "rewbuffer": rewbuffer,
             "lenbuffer": lenbuffer,
             "ep_infos": ep_infos,
-            "score": score,
         }
 
     def update_dreamer_v1(self, train_metrics) -> dict:
