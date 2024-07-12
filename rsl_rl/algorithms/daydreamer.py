@@ -365,9 +365,7 @@ class DayDreamer:
                 )
                 # same for observation
                 obs = data.observation[:, t]
-                logger.debug(
-                    f"obs: {obs.mean()}, {obs.std()} {obs.min()}, {obs.max()}"
-                )
+                logger.debug(f"obs: {obs.mean()}, {obs.std()} {obs.min()}, {obs.max()}")
             deterministic = self.rssm.recurrent_model(
                 prior, data.action[:, t - 1], deterministic
             )
@@ -451,42 +449,13 @@ class DayDreamer:
         self.model_optimizer.zero_grad()
         model_loss.backward()
 
-        # for i in range(len(self.model_params)):
-        #     logger.debug(f"{self.model_params[i].grad.norm()}")
-        logger.debug(f"encoder")
-        for i, p in enumerate(self.encoder.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
-        logger.debug(f"decoder")
-        for i, p in enumerate(self.decoder.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
-        counter = 0
-        for i, p in enumerate(self.rssm.transition_model.parameters()):
-            if i == 0:
-                logger.debug(f"transition_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        for i, p in enumerate(self.rssm.representation_model.parameters()):
-            if i == 0:
-                logger.debug(f"representation_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        for i, p in enumerate(self.rssm.representation_model.parameters()):
-            if i == 0:
-                logger.debug(f"representation_model")
-            logger.debug(f"{i} : {p.grad.norm()}")
-            counter += 1
-        # logger.debug(f"{counter=} layers in three rssm models")
-        logger.debug(f"reward")
-        for i, p in enumerate(self.reward_predictor.parameters()):
-            # print name and norm
-            logger.debug(f"{i} : {p.grad.norm()}")
+        self.log_module_grads(self.encoder, "encoder")
+        self.log_module_grads(self.decoder, "decoder")
+        self.log_module_grads(self.rssm.transition_model, "transition_model")
+        self.log_module_grads(self.rssm.representation_model, "representation_model")
+        self.log_module_grads(self.reward_predictor, "reward_predictor")
         if self.dreamer_config.use_continue_flag:
-            logger.debug(f"continue")
-            for i, p in enumerate(self.continue_predictor.parameters()):
-                # print name and norm
-                logger.debug(f"{i} : {p.grad.norm()}")
+            self.log_module_grads(self.continue_predictor, "continue_predictor")
 
         nn.utils.clip_grad_norm_(
             self.model_params,
@@ -777,3 +746,10 @@ class DayDreamer:
         self.storage.clear()
 
         return train_metrics
+
+    def log_module_grads(self, module, name):
+        logger.debug(name)
+        for i, p in enumerate(module.parameters()):
+            if p.grad is None:
+                continue
+            logger.debug(f"{i} : {p.grad.norm()}")
