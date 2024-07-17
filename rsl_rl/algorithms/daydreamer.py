@@ -7,7 +7,7 @@ import torch.nn as nn
 from dreamer.modules.model import RSSM, ContinueModel, RewardModel
 from dreamer.utils.utils import DynamicInfos, compute_lambda_values, create_normal_dist
 from dreamerv2.models.dense import DenseModel
-from dreamerv2.utils.module import get_parameters
+from dreamerv2.utils.module import FreezeParameters, get_parameters
 from rsl_rl.algorithms.dreamer.actor import Actor
 from rsl_rl.algorithms.dreamer.critic import Critic
 from rsl_rl.storage.rollout_storage import ReplayBuffer
@@ -200,12 +200,15 @@ class DayDreamer:
         self.continue_criterion = nn.BCELoss()
 
         # optimizer
-        self.model_params = (
-            list(self.encoder.parameters())
-            + list(self.decoder.parameters())
-            + list(self.rssm.parameters())
-            + list(self.reward_predictor.parameters())
-        )
+        self.model_modules = [
+            self.encoder,
+            self.decoder,
+            self.rssm,
+            self.reward_predictor,
+        ]
+        if self.dreamer_config.use_continue_flag:
+            self.model_modules.append(self.continue_predictor)
+        self.model_params = get_parameters(self.model_modules)
         if self.dreamer_config.use_continue_flag:
             self.model_params += list(self.continue_predictor.parameters())
 
@@ -285,7 +288,7 @@ class DayDreamer:
         data.embedded_observation = self.encoder(data.observation)
 
         # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
-        # start from 1 because we are already given the first observation
+        # start from 1 because the first observation is given
         for t in range(1, self.num_transitions_per_env):
             if t == 1:
                 # get distribution of actions
@@ -327,6 +330,7 @@ class DayDreamer:
         }
 
     def _model_update(self, data, posterior_info):
+        # reconstruction of observation
         reconstructed_observation_dist = self.decoder(
             torch.cat(
                 (
@@ -339,19 +343,15 @@ class DayDreamer:
         reconstruction_observation_loss = reconstructed_observation_dist.log_prob(
             data.observation[:, 1:]
         )
-        if self.dreamer_config.use_continue_flag:
-            continue_dist = self.continue_predictor(
-                posterior_info.posteriors, posterior_info.deterministics
-            )
-            continue_loss = self.continue_criterion(
-                continue_dist.probs, 1 - data.done[:, 1:]
-            )
 
+        # reward loss
         reward_dist = self.reward_predictor(
             posterior_info.posteriors, posterior_info.deterministics
         )
         reward_loss = reward_dist.log_prob(data.reward[:, 1:])
 
+        # KL(prior || posterior)
+        # in dreamerv2, these are categorical distributions
         prior_dist = create_normal_dist(
             posterior_info.prior_dist_means,
             posterior_info.prior_dist_stds,
@@ -369,12 +369,22 @@ class DayDreamer:
             torch.tensor(self.dreamer_config.kl["free_nats"]).to(self.device),
             kl_divergence_loss,
         )
+
+        # total loss
         model_loss = (
             self.dreamer_config.loss_scale["kl"] * kl_divergence_loss
             - reconstruction_observation_loss.mean()
             - reward_loss.mean()
         )
+
+        # continue model
         if self.dreamer_config.use_continue_flag:
+            continue_dist = self.continue_predictor(
+                posterior_info.posteriors, posterior_info.deterministics
+            )
+            continue_loss = self.continue_criterion(
+                continue_dist.probs, 1 - data.done[:, 1:]
+            )
             model_loss += continue_loss.mean()
 
         self.model_optimizer.zero_grad()
@@ -411,31 +421,34 @@ class DayDreamer:
         deterministic = deterministics.reshape(-1, self.deterministic_size)
 
         # continue_predictor reinit
-        for t in range(self.horizon_length):
-            action = self.actor(state, deterministic)
-            deterministic = self.rssm.recurrent_model(state, action, deterministic)
-            _, state = self.rssm.transition_model(deterministic)
-            self.behavior_learning_infos.append(
-                priors=state, deterministics=deterministic
-            )
+        with FreezeParameters(self.model_modules):
+            for t in range(self.horizon_length):
+                action = self.actor(state, deterministic)
+                deterministic = self.rssm.recurrent_model(state, action, deterministic)
+                _, state = self.rssm.transition_model(deterministic)
+                self.behavior_learning_infos.append(
+                    priors=state, deterministics=deterministic
+                )
 
         losses = self._agent_update(self.behavior_learning_infos.get_stacked())
         return losses
 
     def _agent_update(self, behavior_learning_infos):
-        predicted_rewards = self.reward_predictor(
-            behavior_learning_infos.priors, behavior_learning_infos.deterministics
-        ).mean
         values = self.critic(
             behavior_learning_infos.priors, behavior_learning_infos.deterministics
         ).mean
 
-        if self.dreamer_config.use_continue_flag:
-            continues = self.continue_predictor(
+        with FreezeParameters(self.model_modules):
+            predicted_rewards = self.reward_predictor(
                 behavior_learning_infos.priors, behavior_learning_infos.deterministics
             ).mean
-        else:
-            continues = self.dreamer_config.discount_ * torch.ones_like(values)
+            if self.dreamer_config.use_continue_flag:
+                continues = self.continue_predictor(
+                    behavior_learning_infos.priors,
+                    behavior_learning_infos.deterministics,
+                ).mean
+            else:
+                continues = self.dreamer_config.discount_ * torch.ones_like(values)
 
         lambda_values = compute_lambda_values(
             predicted_rewards,
@@ -501,6 +514,7 @@ class DayDreamer:
         posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
         action = torch.zeros(batch_size, self.action_size).to(self.device)
 
+        count_dones = 0
         for t in range(num_steps_per_env):
 
             deterministic = self.rssm.recurrent_model(posterior, action, deterministic)
@@ -535,6 +549,7 @@ class DayDreamer:
             cur_reward_sum += reward.cpu()
             cur_episode_length += 1
             new_ids = (done > 0).nonzero(as_tuple=False)
+            count_dones += len(new_ids)
             rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
             lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
             cur_reward_sum[new_ids] = 0
@@ -544,6 +559,7 @@ class DayDreamer:
                 score = np.mean(score_lst)
                 self.num_total_episodes += 1
                 logger.debug(f"episode {self.num_total_episodes} score: {score}")
+        print(f"share of dones: {round(count_dones/ num_steps_per_env, 2)}")
 
         if not train:
             evaluate_score = np.mean(score_lst)
