@@ -22,21 +22,18 @@ class DreamerConfig:
     obs_shape: tuple = (1, 48)
     action_size: int = 12
     pixel: bool = False
-    action_repeat: int = 1
 
     buffer_capacity: int = int(
-        1e4
+        1e6
     )  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
     rssm_info: dict = {
-        "deter_size": 200,
+        "deter_size": 400,
         "stoch_size": 30,
-        "class_size": 20,
-        "category_size": 20,
         "min_std": 0.1,
     }
-    embedding_size: int = 128
+    embedding_size: int = 512
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
@@ -49,48 +46,48 @@ class DreamerConfig:
         # "use_free_nats": False,
         # "free_nats": 0.0,
         "use_free_nats": True,
-        "free_nats": 3.0,
+        "free_nats": 1.0,
     }
     actor: dict = {
-        "layers": 3,  # same as node_size but the effect is less pronounced
-        "node_size": 128,  # higher -> positive impact on actor loss, negative impact on value loss
-        "dist": "one_hot",  # not used
-        "min_std": 1e-4,
+        "layers": 2,  # same as node_size but the effect is less pronounced
+        "node_size": 512,  # higher -> positive impact on actor loss, negative impact on value loss
+        # "dist": "one_hot",  # not used
+        "min_std": 1e-3,
         "init_std": 1.0,  # important. has to be high with tanh transform
         "mean_scale": 1.0,  # not important
         "activation": nn.ELU,
     }
     critic: dict = {
-        "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
-        "node_size": 128,  # higher -> positive impact on both actor and value loss
+        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
+        "node_size": 512,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
 
     obs_encoder: dict = {
-        "layers": 3,
-        "node_size": 128,
+        "layers": 5,
+        "node_size": 512,
         "dist": None,
         "activation": nn.ELU,
     }
     obs_decoder: dict = {
-        "layers": 3,
-        "node_size": 128,
+        "layers": 5,
+        "node_size": 1024,
         "dist": "normal",
         "activation": nn.ELU,
     }
     reward: dict = {
-        "layers": 3,
-        "node_size": 128,
+        "layers": 2,
+        "node_size": 512,
         "dist": "normal",
         "activation": nn.ELU,
     }
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
-    model_learning_rate: float = 0.0006
-    actor_learning_rate: float = 0.00008
-    critic_learning_rate: float = 0.00008
+    model_learning_rate: float = 1e-4
+    actor_learning_rate: float = 3e-5
+    critic_learning_rate: float = 3e-5
 
     collect_interval: int = 10
 
