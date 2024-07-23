@@ -55,7 +55,7 @@ class OffPolicyRunner:
         self.env = env
         alg_class = eval(self.cfg["algorithm_class_name"])
         self.alg: DayDreamer = alg_class(device=self.device, **self.alg_cfg)
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]  # legged_robot_config.py
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
@@ -105,10 +105,6 @@ class OffPolicyRunner:
             self.num_steps_per_env,
             num_envs=self.env.num_envs,
         )
-
-        rewbuffer.extend(interaction_info["rewbuffer"])
-        lenbuffer.extend(interaction_info["lenbuffer"])
-        ep_infos.extend(interaction_info["ep_infos"])
 
         # for debugging
         obs = self.alg.buffer.observation
@@ -191,9 +187,6 @@ class OffPolicyRunner:
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
 
         if self.log_dir is not None:
-            self.writer.add_scalar(
-                "Loss/learning_rate", self.alg.learning_rate, locs["it"]
-            )
             self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
             # self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
             self.writer.add_scalar("Perf/total_fps", fps, locs["it"])

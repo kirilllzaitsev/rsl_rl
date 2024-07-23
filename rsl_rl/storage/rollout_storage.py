@@ -465,17 +465,30 @@ class ReplayBuffer(object):
         return self.capacity if self.full else self.buffer_index
 
     def add(self, observation, action, reward, next_observation, done):
-        self.observation[self.buffer_index] = observation
-        self.action[self.buffer_index] = action
-        self.reward[self.buffer_index] = reward.unsqueeze(-1)
-        self.next_observation[self.buffer_index] = next_observation
-        self.done[self.buffer_index] = done.unsqueeze(-1)
+        # problem: if starting from 0 after the buffer is full, trajectory may end up containing two unrelated parts => clear buffer if buffer_index+24 > capacity when ingesting new data
+        # if self.buffer_index + self.num_transitions_per_env > self.capacity:
+        #     # first sample of self.num_transitions_per_env => can clean the buffer and ingest the new data
+        #     self.clear()
+        # assert not self.full, "should not be full"
+
+        self.observation[self.buffer_index] = observation.clone()
+        self.action[self.buffer_index] = action.clone()
+        self.reward[self.buffer_index] = reward.unsqueeze(-1).clone()
+        self.next_observation[self.buffer_index] = next_observation.clone()
+        self.done[self.buffer_index] = done.unsqueeze(-1).clone()
 
         self.buffer_index = (self.buffer_index + 1) % self.capacity
         self.full = self.full or self.buffer_index == 0
 
-    # TODO: should be sampled at random from the buffer (which by itself contains more than the specified number of transitions. it should represent the whole history or at least approximate it)
-    # TODO: does it make sense to limited envs_per_batch even if many more envs are actually used for training?
+    def clear(self):
+        self.observation.zero_()
+        self.next_observation.zero_()
+        self.action.zero_()
+        self.reward.zero_()
+        self.done.zero_()
+        self.buffer_index = 0
+        self.full = False
+
     def sample(self, num_consecutive_trajs, envs_per_batch=64):
         # return batch_size x seq_size x X
         # seq_size is critical for dreamer (the bigger the better)
@@ -487,24 +500,22 @@ class ReplayBuffer(object):
         env_idx = torch.arange(
             0, min(self.num_envs, envs_per_batch), device=self.device
         )
-        sample_index = torch.randint(
+        traj_start_index = torch.randint(
             0,
             max(1, len(self) - self.num_transitions_per_env),
             (num_consecutive_trajs,),
             device=self.device,
         )
-        chunk_length = (
-            torch.arange(self.num_transitions_per_env).to(self.device)
-        )
+        chunk_length = torch.arange(self.num_transitions_per_env).to(self.device)
         # chunk_length = torch.clip(chunk_length, max=self.buffer_index)
 
-        sample_index = (sample_index + chunk_length) % self.capacity
+        traj_idxs = (traj_start_index + chunk_length) % self.capacity
 
-        obs_batch = self.observation[sample_index][:, env_idx].transpose(0, 1)
-        next_obs_batch = self.next_observation[sample_index][:, env_idx].transpose(0, 1)
-        actions_batch = self.action[sample_index][:, env_idx].transpose(0, 1)
-        rewards_batch = self.reward[sample_index][:, env_idx].transpose(0, 1)
-        dones_batch = self.done[sample_index][:, env_idx].transpose(0, 1)
+        obs_batch = self.observation[traj_idxs][:, env_idx].transpose(0, 1)
+        next_obs_batch = self.next_observation[traj_idxs][:, env_idx].transpose(0, 1)
+        actions_batch = self.action[traj_idxs][:, env_idx].transpose(0, 1)
+        rewards_batch = self.reward[traj_idxs][:, env_idx].transpose(0, 1)
+        dones_batch = self.done[traj_idxs][:, env_idx].transpose(0, 1)
 
         batch = {
             "observation": obs_batch,
