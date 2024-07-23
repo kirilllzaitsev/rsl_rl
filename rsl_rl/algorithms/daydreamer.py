@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections import defaultdict, deque
 
@@ -24,24 +25,24 @@ class DreamerConfig:
     pixel: bool = False
 
     buffer_capacity: int = int(
-        1e6
+        1e5
     )  # the more the better, but have to scale network capacities accordingly
     action_dtype: np.dtype = np.float32
 
     rssm_info: dict = {
         "deter_size": 400,
-        "stoch_size": 30,
+        "stoch_size": 50,
         "min_std": 0.1,
     }
     embedding_size: int = 512
 
     grad_clip_norm: float = 100.0
     grad_norm_type: int = 2
-    discount_: float = 0.99
+    discount_: float = 0.997
     lambda_: float = 0.95
     horizon_length: int = 15
 
-    loss_scale: dict = {"kl": 1, "reward": 1.0, "discount": 5.0}
+    loss_scale: dict = {"kl": 1.0, "reward": 1.0, "discount": 1.0}
     kl: dict = {
         # "use_free_nats": False,
         # "free_nats": 0.0,
@@ -49,7 +50,7 @@ class DreamerConfig:
         "free_nats": 1.0,
     }
     actor: dict = {
-        "layers": 2,  # same as node_size but the effect is less pronounced
+        "layers": 3,  # same as node_size but the effect is less pronounced
         "node_size": 512,  # higher -> positive impact on actor loss, negative impact on value loss
         # "dist": "one_hot",  # not used
         "min_std": 1e-3,
@@ -58,36 +59,53 @@ class DreamerConfig:
         "activation": nn.ELU,
     }
     critic: dict = {
-        "layers": 2,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
+        "layers": 3,  # ? higher -> negative impact on both actor and value loss. need to increase their capacities as well (but why higher node_size helps)?!
         "node_size": 512,  # higher -> positive impact on both actor and value loss
         "dist": "normal",
         "activation": nn.ELU,
     }
 
     obs_encoder: dict = {
-        "layers": 5,
+        "layers": 3,
         "node_size": 512,
         "dist": None,
         "activation": nn.ELU,
     }
     obs_decoder: dict = {
-        "layers": 5,
-        "node_size": 1024,
-        "dist": "normal",
-        "activation": nn.ELU,
-    }
-    reward: dict = {
-        "layers": 2,
+        "layers": 4,
         "node_size": 512,
         "dist": "normal",
         "activation": nn.ELU,
     }
+    reward: dict = {
+        "layers": 3,
+        "node_size": 512,
+        "dist": "normal",
+        "activation": nn.ELU,
+    }
+    recurrent_model_config = {
+        "hidden_size": 512,
+        "activation": "ELU",
+    }
+    transition_model_config = {
+        "hidden_size": 512,
+        "num_layers": 3,
+        "activation": "ELU",
+        "min_std": rssm_info["min_std"],
+    }
+    representation_model_config = {
+        "embedded_state_size": embedding_size,
+        "hidden_size": 512,
+        "num_layers": 3,
+        "activation": "ELU",
+        "min_std": rssm_info["min_std"],
+    }
 
     use_continue_flag: bool = False  # NN to predict end of episode
     # learning rates are crucial for convergence and overall performance
-    model_learning_rate: float = 1e-4
-    actor_learning_rate: float = 3e-5
-    critic_learning_rate: float = 3e-5
+    model_learning_rate: float = 3e-4
+    actor_learning_rate: float = 8e-5
+    critic_learning_rate: float = 8e-5
 
     collect_interval: int = 10
 
@@ -103,8 +121,6 @@ class DayDreamer:
     ):
 
         self.device = device
-
-        self.learning_rate = learning_rate
 
         # initialized later
         self.storage = None
@@ -138,23 +154,9 @@ class DayDreamer:
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
             deterministic_size=self.dreamer_config.rssm_info["deter_size"],
             device=self.device,
-            recurrent_model_config={
-                "hidden_size": 200,
-                "activation": "ELU",
-            },
-            transition_model_config={
-                "hidden_size": 200,
-                "num_layers": 2,
-                "activation": "ELU",
-                "min_std": 0.1,
-            },
-            representation_model_config={
-                "embedded_state_size": self.dreamer_config.embedding_size,
-                "hidden_size": 200,
-                "num_layers": 2,
-                "activation": "ELU",
-                "min_std": 0.1,
-            },
+            recurrent_model_config=self.dreamer_config.recurrent_model_config,
+            transition_model_config=self.dreamer_config.transition_model_config,
+            representation_model_config=self.dreamer_config.representation_model_config,
         ).to(self.device)
         self.reward_predictor = RewardModel(
             stochastic_size=self.dreamer_config.rssm_info["stoch_size"],
@@ -225,6 +227,30 @@ class DayDreamer:
         self.deterministic_size = self.dreamer_config.rssm_info["deter_size"]
         self.horizon_length = self.dreamer_config.horizon_length
 
+        # print all model parameters
+        print(
+            f"self.encoder.parameters={sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"self.decoder.parameters={sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"self.rssm.parameters={sum(p.numel() for p in self.rssm.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"self.reward_predictor.parameters={sum(p.numel() for p in self.reward_predictor.parameters() if p.requires_grad)}"
+        )
+        if self.dreamer_config.use_continue_flag:
+            print(
+                f"self.continue_predictor.parameters={sum(p.numel() for p in self.continue_predictor.parameters() if p.requires_grad)}"
+            )
+        print(
+            f"self.actor.parameters={sum(p.numel() for p in self.actor.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"self.critic.parameters={sum(p.numel() for p in self.critic.parameters() if p.requires_grad)}"
+        )
+
     def init_storage(
         self,
         num_envs,
@@ -287,6 +313,7 @@ class DayDreamer:
         # self.num_transitions_per_env != seq_len which could be arbitrarily short/long
         # start from 1 because the first observation is given
         for t in range(1, self.num_transitions_per_env):
+            # debug
             if t == 1:
                 # get distribution of actions
                 action = data.action[:, t - 1]
@@ -418,7 +445,7 @@ class DayDreamer:
         deterministic = deterministics.reshape(-1, self.deterministic_size)
 
         # continue_predictor reinit
-        with FreezeParameters(self.model_modules):
+        with FreezeParameters(self.model_modules, enabled=False):
             for t in range(self.horizon_length):
                 action = self.actor(state, deterministic)
                 deterministic = self.rssm.recurrent_model(state, action, deterministic)
@@ -435,7 +462,7 @@ class DayDreamer:
             behavior_learning_infos.priors, behavior_learning_infos.deterministics
         ).mean
 
-        with FreezeParameters(self.model_modules):
+        with FreezeParameters(self.model_modules, enabled=False):
             predicted_rewards = self.reward_predictor(
                 behavior_learning_infos.priors, behavior_learning_infos.deterministics
             ).mean
@@ -505,8 +532,9 @@ class DayDreamer:
         cur_episode_length = torch.zeros(num_envs, dtype=torch.float)
         score_lst = []
 
-        observation, _ = env.reset()
-        embedded_observation = self.encoder(observation.to(self.device))
+        last_observation = env.get_observations()
+        embedded_observation = self.encoder(last_observation.to(self.device))
+        observation = copy.deepcopy(last_observation)
         batch_size = embedded_observation.shape[0]
         posterior, deterministic = self.rssm.recurrent_model_input_init(batch_size)
         action = torch.zeros(batch_size, self.action_size).to(self.device)
@@ -546,11 +574,12 @@ class DayDreamer:
             cur_reward_sum += reward.cpu()
             cur_episode_length += 1
             new_ids = (done > 0).nonzero(as_tuple=False)
-            count_dones += len(new_ids)
             rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
             lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
             cur_reward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
+
+            count_dones += len(new_ids)
 
             if train:
                 score = np.mean(score_lst)
@@ -567,6 +596,7 @@ class DayDreamer:
             "rewbuffer": rewbuffer,
             "lenbuffer": lenbuffer,
             "ep_infos": ep_infos,
+            "last_observation": observation,
         }
 
     def log_module_grads(self, module, name):
